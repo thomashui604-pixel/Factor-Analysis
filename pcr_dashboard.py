@@ -267,6 +267,7 @@ def rolling_pca_regression(std_returns_basket, std_returns_target, pca_win, var_
     all_pc_betas = []       # regression betas on PCs
 
     min_start = max(0, pca_win)  # need at least pca_win observations
+    prev_components = None  # for sign consistency
 
     for i in range(min_start, n_obs):
         window_start = i - pca_win
@@ -287,6 +288,21 @@ def rolling_pca_regression(std_returns_basket, std_returns_target, pca_win, var_
             pc_scores = pca.fit_transform(X_clean)
         except Exception:
             continue
+
+        # ── Sign consistency fix ──
+        # Eigenvectors are only defined up to sign. Without correction,
+        # PCA can arbitrarily flip the sign of a PC between adjacent
+        # windows, causing artificial choppiness in loadings plots.
+        # Fix: if a PC's dot product with the previous window's PC is
+        # negative, flip its sign (in both components and scores).
+        if prev_components is not None:
+            n_compare = min(pca.components_.shape[0], prev_components.shape[0])
+            for pc_idx in range(n_compare):
+                dot = np.dot(pca.components_[pc_idx], prev_components[pc_idx])
+                if dot < 0:
+                    pca.components_[pc_idx] *= -1
+                    pc_scores[:, pc_idx] *= -1
+        prev_components = pca.components_.copy()
 
         cum_var = np.cumsum(pca.explained_variance_ratio_)
         n_pcs = int(np.searchsorted(cum_var, var_thresh) + 1)
