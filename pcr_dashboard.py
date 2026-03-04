@@ -15,8 +15,39 @@ import matplotlib
 matplotlib.use("Agg")
 from io import BytesIO
 from datetime import datetime, timedelta
+import time
 import warnings
 warnings.filterwarnings("ignore")
+
+
+# ─────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────
+# Common tickers that need Yahoo Finance symbol remapping
+TICKER_REMAP = {
+    "VIX": "^VIX",
+    "DXY": "DX-Y.NYB",
+    "TNX": "^TNX",
+    "TYX": "^TYX",
+    "IRX": "^IRX",
+    "GSPC": "^GSPC",
+    "DJI": "^DJI",
+    "IXIC": "^IXIC",
+    "RUT": "^RUT",
+}
+
+# Reverse map for display (Yahoo symbol -> user-friendly name)
+TICKER_DISPLAY = {v: k for k, v in TICKER_REMAP.items()}
+
+
+def remap_tickers(tickers):
+    """Remap user-friendly ticker names to Yahoo Finance symbols."""
+    return [TICKER_REMAP.get(t, t) for t in tickers]
+
+
+def display_name(ticker):
+    """Get user-friendly display name for a Yahoo Finance symbol."""
+    return TICKER_DISPLAY.get(ticker, ticker)
 
 # ─────────────────────────────────────────────
 # Page config
@@ -98,32 +129,62 @@ representative_method = st.sidebar.radio(
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_data(tickers, target, years):
     all_tickers = list(set(tickers + [target]))
+    # Remap to Yahoo Finance symbols
+    yf_tickers = remap_tickers(all_tickers)
     end = datetime.today()
     start = end - timedelta(days=years * 365 + vol_window + 60)  # extra buffer
-    data = yf.download(all_tickers, start=start, end=end, auto_adjust=True, progress=False)
 
-    # Handle both MultiIndex and single-ticker case
-    if isinstance(data.columns, pd.MultiIndex):
-        prices = data["Close"]
-    else:
-        prices = data[["Close"]]
-        prices.columns = all_tickers
+    # Download with retry for rate limiting
+    prices = None
+    for attempt in range(3):
+        try:
+            data = yf.download(yf_tickers, start=start, end=end, auto_adjust=True, progress=False)
+            if isinstance(data.columns, pd.MultiIndex):
+                prices = data["Close"]
+            else:
+                prices = data[["Close"]]
+                prices.columns = yf_tickers
+            break
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(2 ** attempt)  # exponential backoff
+            else:
+                raise e
 
+    if prices is None or prices.empty:
+        return pd.DataFrame()
+
+    # Rename columns back to user-friendly names
+    rename_map = {yf: orig for orig, yf in zip(all_tickers, yf_tickers)}
+    prices = prices.rename(columns=rename_map)
     prices = prices.dropna(how="all")
     return prices
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_volume(tickers, years):
+    yf_tickers = remap_tickers(tickers)
     end = datetime.today()
     start = end - timedelta(days=years * 365 + 60)
-    data = yf.download(tickers, start=start, end=end, auto_adjust=True, progress=False)
-    if isinstance(data.columns, pd.MultiIndex):
-        vol = data["Volume"]
-    else:
-        vol = data[["Volume"]]
-        vol.columns = tickers
-    return vol
+
+    for attempt in range(3):
+        try:
+            data = yf.download(yf_tickers, start=start, end=end, auto_adjust=True, progress=False)
+            if isinstance(data.columns, pd.MultiIndex):
+                vol = data["Volume"]
+            else:
+                vol = data[["Volume"]]
+                vol.columns = yf_tickers
+            # Rename back
+            rename_map = {yf: orig for orig, yf in zip(tickers, yf_tickers)}
+            vol = vol.rename(columns=rename_map)
+            return vol
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+            else:
+                raise e
+    return pd.DataFrame()
 
 
 # ─────────────────────────────────────────────
@@ -274,16 +335,22 @@ if run_button:
         prices = load_data(basket_tickers, target_ticker, lookback_years)
         volume = load_volume(basket_tickers, lookback_years)
 
+    if prices.empty:
+        st.error("Failed to download price data. Try again in a moment (Yahoo Finance may be rate limiting).")
+        st.stop()
+
     # Check which tickers we actually got
     available_basket = [t for t in basket_tickers if t in prices.columns]
     missing = [t for t in basket_tickers if t not in prices.columns]
     if target_ticker not in prices.columns:
-        st.error(f"Target ticker '{target_ticker}' not found in downloaded data.")
+        st.error(f"Target ticker '{target_ticker}' not found. Check the symbol or try again (rate limiting may have blocked it).")
         st.stop()
     if missing:
-        st.warning(f"Missing tickers (not found): {', '.join(missing)}")
+        st.warning(f"Missing tickers (not found or rate limited): {', '.join(missing)}")
+        st.info("💡 Tip: For index tickers, use Yahoo Finance symbols — e.g. VIX is auto-remapped to ^VIX. "
+                "If a ticker failed due to rate limiting, wait a moment and re-run.")
     if len(available_basket) < 3:
-        st.error("Need at least 3 basket tickers with data.")
+        st.error("Need at least 3 basket tickers with data. Try reducing the basket or waiting for rate limits to clear.")
         st.stop()
 
     with st.spinner("Computing returns and standardizing..."):
@@ -315,18 +382,28 @@ if run_button:
         st.subheader("Dendrogram & Cluster Analysis")
 
         # Use recent data for dendrogram (last vol_window days)
-        recent_ret = log_ret[available_basket].iloc[-vol_window:]
-        corr_matrix = recent_ret.corr()
+        recent_ret = log_ret[available_basket].iloc[-vol_window:].dropna(axis=1, how="all")
+        # Update available_basket to only tickers with enough data
+        available_basket_dendro = [t for t in available_basket if t in recent_ret.columns and recent_ret[t].notna().sum() > 10]
 
-        Z = run_dendrogram_analysis(corr_matrix, available_basket)
+        if len(available_basket_dendro) < 3:
+            st.error("Not enough tickers with sufficient data for dendrogram analysis. "
+                     "Try increasing the lookback period or checking your ticker symbols.")
+            st.stop()
+
+        recent_ret = recent_ret[available_basket_dendro]
+        corr_matrix = recent_ret.corr().dropna(axis=0, how="all").dropna(axis=1, how="all")
+
+        Z = run_dendrogram_analysis(corr_matrix, available_basket_dendro)
 
         # Plot dendrogram with matplotlib (scipy requires it)
         fig_dendro, ax = plt.subplots(figsize=(12, 5))
+        effective_clusters = min(n_clusters, len(available_basket_dendro))
         dendro_result = dendrogram(
             Z,
-            labels=available_basket,
+            labels=available_basket_dendro,
             ax=ax,
-            color_threshold=Z[-(n_clusters - 1), 2] if n_clusters <= len(Z) else 0,
+            color_threshold=Z[-(effective_clusters - 1), 2] if effective_clusters <= len(Z) else 0,
             above_threshold_color="grey",
             leaf_rotation=45,
             leaf_font_size=10
@@ -337,11 +414,12 @@ if run_button:
         st.pyplot(fig_dendro)
 
         # Cluster assignments
-        clusters = fcluster(Z, t=n_clusters, criterion="maxclust")
+        clusters = fcluster(Z, t=effective_clusters, criterion="maxclust")
 
         # Select representatives
         reps, cluster_map = select_representatives(
-            corr_matrix, clusters, available_basket, volume[available_basket].iloc[-vol_window:],
+            corr_matrix, clusters, available_basket_dendro,
+            volume[[t for t in available_basket_dendro if t in volume.columns]].iloc[-vol_window:],
             representative_method
         )
 
