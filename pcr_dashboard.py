@@ -61,10 +61,11 @@ pca_window = st.sidebar.slider(
 
 variance_threshold = st.sidebar.slider(
     "Variance Explained Threshold",
-    min_value=0.70, max_value=0.99, value=0.90, step=0.01,
-    format="%.0f%%",
+    min_value=70, max_value=99, value=90, step=1,
+    format="%d%%",
     help="Fixed threshold: include PCs until this % of variance is explained."
 )
+variance_threshold = variance_threshold / 100.0  # convert to decimal for computation
 
 lookback_years = st.sidebar.slider(
     "Data Lookback (years)",
