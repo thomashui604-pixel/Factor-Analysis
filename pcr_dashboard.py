@@ -385,6 +385,12 @@ PC_COLORS = [
     "#9C27B0", "#FF9800", "#00BCD4", "#E91E63", "#8BC34A"
 ]
 
+def hex_to_rgba(hex_color: str, alpha: float) -> str:
+    """Convert '#RRGGBB' to 'rgba(r,g,b,alpha)' — Plotly-safe."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main flow
@@ -648,7 +654,7 @@ with tab2:
         fig_k.add_trace(go.Scatter(
             x=list(bser.index) + list(bser.index[::-1]),
             y=list(upper) + list(lower[::-1]),
-            fill="toself", fillcolor=PC_COLORS[k % len(PC_COLORS)].replace(")", ",0.12)").replace("rgb", "rgba") if "rgb" in PC_COLORS[k%len(PC_COLORS)] else PC_COLORS[k % len(PC_COLORS)] + "20",
+            fill="toself", fillcolor=hex_to_rgba(PC_COLORS[k % len(PC_COLORS)], 0.12),
             line=dict(color="rgba(0,0,0,0)"),
             showlegend=False, name="±1σ band"
         ))
@@ -680,7 +686,7 @@ with tab2:
             fig_var.add_trace(go.Scatter(
                 x=var_df.index, y=var_df[col],
                 name=col, stackgroup="one", mode="lines",
-                fillcolor=PC_COLORS[k % len(PC_COLORS)] + "AA",
+                fillcolor=hex_to_rgba(PC_COLORS[k % len(PC_COLORS)], 0.67),
                 line=dict(color=PC_COLORS[k % len(PC_COLORS)])
             ))
     fig_var.update_layout(
