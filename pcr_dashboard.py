@@ -259,6 +259,8 @@ def rolling_pca(std_basket: pd.DataFrame,
     out_var_exp  = []          # (K,) variance explained by each retained PC
     out_pc_corr  = []          # (K, N) correlation of each PC with each asset
     out_n_pcs    = []
+    out_contribs = []          # (K,) = beta_k * F_k(t) for last obs in window
+    out_target   = []          # actual target return at time t (for overlay)
 
     reference_loadings = None  # anchored to first window for sign alignment
 
@@ -326,25 +328,35 @@ def rolling_pca(std_basket: pd.DataFrame,
         corr_block = np.corrcoef(factors.T, X.T)[:k, k:]   # (k, N)
 
         # ── Store ──
+        # contributions: beta_k * F_k at last obs in window
+        # sum = fitted value for that period — what the stacked area shows
+        last_factors  = factors[-1, :]
+        pc_betas      = betas[1:k+1]
+        contributions = pc_betas * last_factors     # (k,) element-wise
+
         out_dates.append(std_basket.index[t])
-        out_betas.append(betas[1:k+1])           # drop intercept
+        out_betas.append(betas[1:k+1])
         out_r2.append(r2)
         out_r2_ols.append(r2_ols)
         out_resid.append(resid[-1])
         out_var_exp.append(eigvals[:k] / total_var)
         out_pc_corr.append(corr_block)
         out_n_pcs.append(k)
+        out_contribs.append(contributions)
+        out_target.append(y_dm[-1])                 # demeaned target return
 
     return {
         "dates"    : out_dates,
-        "betas"    : out_betas,        # list of arrays, lengths vary if var_thresh
+        "betas"    : out_betas,
         "r2"       : out_r2,
         "r2_ols"   : out_r2_ols,
         "resid"    : out_resid,
         "var_exp"  : out_var_exp,
-        "pc_corr"  : out_pc_corr,      # list of (k, N) arrays
+        "pc_corr"  : out_pc_corr,
         "n_pcs"    : out_n_pcs,
         "assets"   : asset_cols,
+        "contribs" : out_contribs,     # list of (k,) arrays
+        "target"   : out_target,       # list of floats (demeaned target return)
     }
 
 
@@ -497,11 +509,18 @@ corr_arr = np.full((n_windows, n_pcs_max, n_assets), np.nan)
 for i, c in enumerate(res["pc_corr"]):
     corr_arr[i, :c.shape[0], :c.shape[1]] = c
 
+# Contributions: beta_k * F_k(t) per PC per window (windows, n_pcs_max)
+contrib_arr = np.full((n_windows, n_pcs_max), np.nan)
+for i, c in enumerate(res["contribs"]):
+    contrib_arr[i, :len(c)] = c
+
 pc_cols    = [f"PC{k+1}" for k in range(n_pcs_max)]
-beta_df    = pd.DataFrame(betas_arr, index=dates, columns=pc_cols)
-var_df     = pd.DataFrame(var_arr,   index=dates, columns=pc_cols)
-r2_ser     = pd.Series(res["r2"],     index=dates, name="R²")
-r2_ols_ser = pd.Series(res["r2_ols"], index=dates, name="OLS R²")
+beta_df    = pd.DataFrame(betas_arr,   index=dates, columns=pc_cols)
+var_df     = pd.DataFrame(var_arr,     index=dates, columns=pc_cols)
+contrib_df = pd.DataFrame(contrib_arr, index=dates, columns=pc_cols)
+target_ser = pd.Series(res["target"],  index=dates, name="Target")
+r2_ser     = pd.Series(res["r2"],     index=dates, name="R\u00b2")
+r2_ols_ser = pd.Series(res["r2_ols"], index=dates, name="OLS R\u00b2")
 resid_ser  = pd.Series(res["resid"],  index=dates, name="Residual")
 n_pcs_ser  = pd.Series(res["n_pcs"], index=dates, name="N PCs")
 
@@ -914,6 +933,107 @@ with tab4:
         hovermode="x unified", height=280
     )
     st.plotly_chart(fig_npcs, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── Factor Contribution Stack ──
+    st.subheader("Factor Contribution Stack")
+    st.caption(
+        "Each bar shows how much each latent PC contributed to the target's fitted return "
+        "in that period: **contribution = β_k × F_k(t)**. "
+        "Bars stack additively — their sum equals the model's fitted value (black line). "
+        "The grey line is the actual target return. The gap between black and grey is the residual. "
+        "Vertical red dashed lines mark periods where the total fitted move exceeded 2σ "
+        "from its rolling mean — regime events worth examining."
+    )
+
+    # Build contribution stack
+    # Use PC labels from Tab 3 color map for consistency
+    contrib_colors = [
+        "#2196F3", "#FF5722", "#4CAF50",
+        "#9C27B0", "#FF9800", "#00BCD4", "#E91E63", "#8BC34A"
+    ]
+
+    fig_contrib = go.Figure()
+
+    # Stacked bars: positive and negative separately so they stack correctly
+    for k in range(n_pcs_max):
+        pc = f"PC{k+1}"
+        col = contrib_df[pc].dropna()
+        if col.empty:
+            continue
+        color = contrib_colors[k % len(contrib_colors)]
+        # Positive contributions
+        fig_contrib.add_trace(go.Bar(
+            x=contrib_df.index,
+            y=contrib_df[pc].clip(lower=0),
+            name=pc,
+            marker_color=color,
+            opacity=0.85,
+            legendgroup=pc,
+            showlegend=True,
+            hovertemplate=f"{pc}: %{{y:.3f}}<extra></extra>"
+        ))
+        # Negative contributions (same color, same legend group)
+        fig_contrib.add_trace(go.Bar(
+            x=contrib_df.index,
+            y=contrib_df[pc].clip(upper=0),
+            name=pc,
+            marker_color=color,
+            opacity=0.85,
+            legendgroup=pc,
+            showlegend=False,
+            hovertemplate=f"{pc}: %{{y:.3f}}<extra></extra>"
+        ))
+
+    # Fitted value line (sum of contributions)
+    fitted = contrib_df.sum(axis=1)
+    fig_contrib.add_trace(go.Scatter(
+        x=fitted.index, y=fitted.values,
+        name="Fitted (sum of contributions)",
+        mode="lines",
+        line=dict(color="black", width=2),
+        hovertemplate="Fitted: %{y:.3f}<extra></extra>"
+    ))
+
+    # Actual target return overlay
+    fig_contrib.add_trace(go.Scatter(
+        x=target_ser.index, y=target_ser.values,
+        name=f"Actual {target_ticker} return",
+        mode="lines",
+        line=dict(color="rgba(120,120,120,0.7)", width=1.5, dash="dot"),
+        hovertemplate="Actual: %{y:.3f}<extra></extra>"
+    ))
+
+    # Event markers: dates where |fitted| > rolling mean + 2σ
+    roll_mean = fitted.rolling(60, min_periods=20).mean()
+    roll_std  = fitted.rolling(60, min_periods=20).std()
+    threshold = roll_mean.abs() + 2 * roll_std
+    event_dates = fitted.index[np.abs(fitted.values) > threshold.values]
+
+    for ev_date in event_dates:
+        fig_contrib.add_vline(
+            x=ev_date,
+            line_dash="dash", line_color="rgba(220,50,50,0.6)", line_width=1,
+        )
+
+    if len(event_dates) > 0:
+        st.caption(
+            f"🔴 {len(event_dates)} regime event(s) flagged (|fitted| > 2σ from rolling mean): "
+            + ", ".join(d.strftime("%Y-%m") for d in event_dates[:8])
+            + ("..." if len(event_dates) > 8 else "")
+        )
+
+    fig_contrib.update_layout(
+        barmode="relative",
+        title=f"{target_ticker} — Factor Contribution Stack (β_k × F_k per period)",
+        yaxis_title="Contribution (standardized units)",
+        hovermode="x unified",
+        height=480,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, font_size=10),
+        plot_bgcolor="rgba(250,250,250,1)"
+    )
+    st.plotly_chart(fig_contrib, use_container_width=True)
 
     st.markdown("---")
 
