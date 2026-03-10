@@ -259,8 +259,9 @@ def rolling_pca(std_basket: pd.DataFrame,
     out_var_exp  = []          # (K,) variance explained by each retained PC
     out_pc_corr  = []          # (K, N) correlation of each PC with each asset
     out_n_pcs    = []
-    out_contribs = []          # (K,) = beta_k * F_k(t) for last obs in window
-    out_target   = []          # actual target return at time t (for overlay)
+    out_contribs     = []      # (K,) = beta_k * F_k(t) for last obs in window
+    out_target       = []      # actual target return at time t (for overlay)
+    out_pc1_loadings = []      # (N,) eigenvector weights for PC1 in each window
 
     reference_loadings = None  # anchored to first window for sign alignment
 
@@ -344,6 +345,7 @@ def rolling_pca(std_basket: pd.DataFrame,
         out_n_pcs.append(k)
         out_contribs.append(contributions)
         out_target.append(y_dm[-1])                 # demeaned target return
+        out_pc1_loadings.append(eigvecs[:, 0].copy())  # PC1 eigenvector (N,)
 
     return {
         "dates"    : out_dates,
@@ -355,8 +357,9 @@ def rolling_pca(std_basket: pd.DataFrame,
         "pc_corr"  : out_pc_corr,
         "n_pcs"    : out_n_pcs,
         "assets"   : asset_cols,
-        "contribs" : out_contribs,     # list of (k,) arrays
-        "target"   : out_target,       # list of floats (demeaned target return)
+        "contribs"      : out_contribs,       # list of (k,) arrays
+        "target"        : out_target,         # list of floats (demeaned target return)
+        "pc1_loadings"  : out_pc1_loadings,   # list of (N,) eigenvectors for PC1
     }
 
 
@@ -519,6 +522,19 @@ beta_df    = pd.DataFrame(betas_arr,   index=dates, columns=pc_cols)
 var_df     = pd.DataFrame(var_arr,     index=dates, columns=pc_cols)
 contrib_df = pd.DataFrame(contrib_arr, index=dates, columns=pc_cols)
 target_ser = pd.Series(res["target"],  index=dates, name="Target")
+
+# PC1 ticker-level contribution: loading_j * std_return_j(t) for each basket asset
+# This decomposes PC1 itself into what drove it each period.
+# Shape: (windows, n_assets)
+pc1_load_arr = np.vstack(res["pc1_loadings"])          # (windows, N)
+# align std_basket to window dates
+std_basket_at_dates = std_basket.reindex(dates).values  # (windows, N)
+pc1_ticker_contrib  = pc1_load_arr * std_basket_at_dates  # (windows, N) element-wise
+pc1_ticker_contrib_df = pd.DataFrame(
+    pc1_ticker_contrib, index=dates, columns=avail_basket
+)
+# PC1 realized value = sum of ticker contributions (should equal factors[:,0])
+pc1_realized = pc1_ticker_contrib_df.sum(axis=1)
 r2_ser     = pd.Series(res["r2"],     index=dates, name="R\u00b2")
 r2_ols_ser = pd.Series(res["r2_ols"], index=dates, name="OLS R\u00b2")
 resid_ser  = pd.Series(res["resid"],  index=dates, name="Residual")
@@ -724,17 +740,15 @@ with tab2:
 with tab3:
     st.subheader("What Is Each PC Capturing Over Time?")
     st.caption(
-        "Each stacked area chart shows the **relative share** of each basket asset's "
-        "contribution to a PC in each rolling window — computed as normalized absolute correlations. "
-        "When one color dominates the stack, that asset's risk dimension is what the PC is capturing. "
-        "When the stack is fragmented, the factor is diffuse. "
-        "The black conviction line shows mean absolute correlation before normalization — "
-        "a flat low line means even the dominant color shouldn't be trusted."
+        "For each PC, the lines show the rolling correlation between that PC's realized "
+        "time series and each basket asset's returns. "
+        "When one line pulls away from the rest (above 0.5 or below -0.5), "
+        "that asset's risk dimension is what the PC is currently capturing. "
+        "Crossovers and shifts in dominance = regime changes in factor interpretation."
     )
 
     from collections import Counter
 
-    # Consistent color map across all PCs
     asset_color_list = [
         "#2196F3", "#FF5722", "#4CAF50", "#9C27B0", "#FF9800",
         "#00BCD4", "#E91E63", "#8BC34A", "#795548", "#607D8B"
@@ -745,29 +759,18 @@ with tab3:
     }
 
     for k in range(n_pcs_max):
-        pc_label   = f"PC{k+1}"
-        pc_corr_k  = corr_arr[:, k, :]                       # (windows, N)
+        pc_label  = f"PC{k+1}"
+        pc_corr_k = corr_arr[:, k, :]
         valid_rows = ~np.all(np.isnan(pc_corr_k), axis=1)
 
         if not valid_rows.any():
             continue
 
         valid_dates = [d for d, v in zip(dates, valid_rows) if v]
-        valid_corrs = pc_corr_k[valid_rows]                   # (valid_windows, N)
+        valid_corrs = pc_corr_k[valid_rows]
 
-        # ── Normalize absolute correlations to sum to 1 per window ──
-        # This gives relative share: how much of this PC's character
-        # is attributable to each asset proportionally.
-        abs_corrs  = np.abs(valid_corrs)
-        row_sums   = abs_corrs.sum(axis=1, keepdims=True)
-        row_sums   = np.where(row_sums == 0, 1, row_sums)    # avoid div/0
-        norm_corrs = abs_corrs / row_sums                     # (windows, N), each row sums to 1
-
-        # Conviction: mean absolute correlation before normalization
-        # Low = factor is weak/diffuse. High = factor is sharp.
-        conviction = abs_corrs.mean(axis=1)                   # (windows,)
-
-        # ── Stability stats (for badge) ──
+        # Stability badge
+        abs_corrs = np.abs(valid_corrs)
         dom_idx   = np.nanargmax(abs_corrs, axis=1)
         dom_asset = [avail_basket[i] for i in dom_idx]
         counts    = Counter(dom_asset)
@@ -776,83 +779,41 @@ with tab3:
         top_pct   = counts.most_common(1)[0][1] / total
 
         st.markdown(f"### {pc_label}")
-
         if top_pct > 0.8:
-            st.success(
-                f"✅ **Stable** — **{top_asset}** dominates in {top_pct:.0%} of windows."
-            )
+            st.success(f"✅ **Stable** — **{top_asset}** dominates in {top_pct:.0%} of windows.")
         elif top_pct > 0.5:
-            st.info(
-                f"ℹ️ **Moderate** — {top_asset} leads ({top_pct:.0%}) but shifts at times."
-            )
+            st.info(f"ℹ️ **Moderate** — {top_asset} leads ({top_pct:.0%}) but shifts at times.")
         else:
-            st.warning(
-                f"⚠️ **Unstable** — no single asset dominates. Regime-dependent interpretation."
-            )
+            st.warning(f"⚠️ **Unstable** — no single asset dominates. Regime-dependent.")
 
-        # ── Stacked area chart ──
-        # Each asset is one trace with stackgroup="one".
-        # y-axis runs 0→1 (normalized share). Conviction overlaid on secondary axis.
-
-        fig_stack = go.Figure()
-
+        fig_lines = go.Figure()
         for j, asset in enumerate(avail_basket):
-            fig_stack.add_trace(go.Scatter(
-                x=valid_dates,
-                y=norm_corrs[:, j],
-                name=asset,
-                stackgroup="one",
-                mode="lines",
-                line=dict(width=0.5, color=asset_color_map[asset]),
-                fillcolor=hex_to_rgba(asset_color_map[asset], 0.80),
-                hovertemplate=f"{asset}: %{{y:.1%}}<extra></extra>"
+            corr_col = valid_corrs[:, j]
+            if np.isnan(corr_col).all():
+                continue
+            fig_lines.add_trace(go.Scatter(
+                x=valid_dates, y=corr_col,
+                name=asset, mode="lines",
+                line=dict(color=asset_color_map[asset], width=1.8),
+                hovertemplate=f"{asset}: %{{y:.2f}}<extra></extra>"
             ))
 
-        # Conviction overlay on secondary y-axis
-        fig_stack.add_trace(go.Scatter(
-            x=valid_dates,
-            y=conviction,
-            name="Conviction (mean |corr|)",
-            mode="lines",
-            yaxis="y2",
-            line=dict(color="rgba(0,0,0,0.6)", width=1.5, dash="dot"),
-            hovertemplate="Conviction: %{y:.2f}<extra></extra>"
-        ))
-
-        fig_stack.add_hline(
-            y=0.5, line_dash="dash",
-            line_color="rgba(255,255,255,0.4)",
-            annotation_text="50% share",
-            annotation_font_size=9,
-            annotation_font_color="white"
-        )
-
-        fig_stack.update_layout(
-            title=f"{pc_label} — Relative Factor Composition Over Time (normalized |corr|)",
-            yaxis=dict(
-                range=[0, 1],
-                tickformat=".0%",
-                title="Share of PC character",
-                showgrid=False
-            ),
-            yaxis2=dict(
-                range=[0, 1],
-                title="Conviction (mean |corr|)",
-                overlaying="y",
-                side="right",
-                showgrid=False,
-                tickformat=".2f"
-            ),
+        fig_lines.add_hline(y=0,    line_dash="dot",  line_color="rgba(150,150,150,0.5)")
+        fig_lines.add_hline(y=0.5,  line_dash="dash", line_color="rgba(150,150,150,0.35)",
+                            annotation_text="0.5", annotation_font_size=9)
+        fig_lines.add_hline(y=-0.5, line_dash="dash", line_color="rgba(150,150,150,0.35)",
+                            annotation_text="-0.5", annotation_font_size=9)
+        fig_lines.update_layout(
+            title=f"{pc_label} — Rolling Correlation with Each Basket Asset",
+            yaxis=dict(range=[-1, 1], title="Correlation"),
             hovermode="x unified",
             height=360,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, font_size=10),
-            margin=dict(t=40, b=20),
-            plot_bgcolor="rgba(245,245,245,1)"
+            margin=dict(t=40, b=20)
         )
-        st.plotly_chart(fig_stack, use_container_width=True)
+        st.plotly_chart(fig_lines, use_container_width=True)
 
-        # ── Breakdown table (collapsible) ──
-        with st.expander(f"{pc_label} — Full breakdown (% of windows as dominant asset)"):
+        with st.expander(f"{pc_label} — Label breakdown (% of windows dominant)"):
             rows = [
                 {"Asset": a, "% of windows dominant": f"{c/total:.0%}", "Windows": c}
                 for a, c in counts.most_common()
@@ -936,80 +897,66 @@ with tab4:
 
     st.markdown("---")
 
-    # ── Factor Contribution Stack ──
-    st.subheader("Factor Contribution Stack")
+    # ── PC1 Ticker Contribution Stack ──
+    st.subheader("PC1 Ticker Contribution Stack")
     st.caption(
-        "Each bar shows how much each latent PC contributed to the target's fitted return "
-        "in that period: **contribution = β_k × F_k(t)**. "
-        "Bars stack additively — their sum equals the model's fitted value (black line). "
-        "The grey line is the actual target return. The gap between black and grey is the residual. "
-        "Vertical red dashed lines mark periods where the total fitted move exceeded 2σ "
-        "from its rolling mean — regime events worth examining."
+        "This decomposes **PC1 itself** into what drove it each period — in actual ticker terms. "
+        "Each bar is **loading_j × ticker_return_j(t)**: the eigenvector weight times that "
+        "asset's standardized return. Bars stack to equal PC1's realized value (black line). "
+        "This answers: *when PC1 moved, which basket assets were responsible?* "
+        "Regime events (|PC1| > 2σ rolling) are flagged with red dashed lines."
     )
 
-    # Build contribution stack
-    # Use PC labels from Tab 3 color map for consistency
-    contrib_colors = [
-        "#2196F3", "#FF5722", "#4CAF50",
-        "#9C27B0", "#FF9800", "#00BCD4", "#E91E63", "#8BC34A"
+    ticker_colors = [
+        "#2196F3", "#FF5722", "#4CAF50", "#9C27B0", "#FF9800",
+        "#00BCD4", "#E91E63", "#8BC34A", "#795548", "#607D8B"
     ]
 
     fig_contrib = go.Figure()
 
-    # Stacked bars: positive and negative separately so they stack correctly
-    for k in range(n_pcs_max):
-        pc = f"PC{k+1}"
-        col = contrib_df[pc].dropna()
-        if col.empty:
-            continue
-        color = contrib_colors[k % len(contrib_colors)]
-        # Positive contributions
+    for j, asset in enumerate(avail_basket):
+        color = ticker_colors[j % len(ticker_colors)]
+        contrib_col = pc1_ticker_contrib_df[asset]
+        # Positive slice
         fig_contrib.add_trace(go.Bar(
-            x=contrib_df.index,
-            y=contrib_df[pc].clip(lower=0),
-            name=pc,
+            x=pc1_ticker_contrib_df.index,
+            y=contrib_col.clip(lower=0),
+            name=asset,
             marker_color=color,
             opacity=0.85,
-            legendgroup=pc,
+            legendgroup=asset,
             showlegend=True,
-            hovertemplate=f"{pc}: %{{y:.3f}}<extra></extra>"
+            hovertemplate=f"{asset}: %{{y:.3f}}<extra></extra>"
         ))
-        # Negative contributions (same color, same legend group)
+        # Negative slice (same color, no duplicate legend)
         fig_contrib.add_trace(go.Bar(
-            x=contrib_df.index,
-            y=contrib_df[pc].clip(upper=0),
-            name=pc,
+            x=pc1_ticker_contrib_df.index,
+            y=contrib_col.clip(upper=0),
+            name=asset,
             marker_color=color,
             opacity=0.85,
-            legendgroup=pc,
+            legendgroup=asset,
             showlegend=False,
-            hovertemplate=f"{pc}: %{{y:.3f}}<extra></extra>"
+            hovertemplate=f"{asset}: %{{y:.3f}}<extra></extra>"
         ))
 
-    # Fitted value line (sum of contributions)
-    fitted = contrib_df.sum(axis=1)
+    # PC1 realized value (black line) — should equal sum of contributions
     fig_contrib.add_trace(go.Scatter(
-        x=fitted.index, y=fitted.values,
-        name="Fitted (sum of contributions)",
+        x=pc1_realized.index, y=pc1_realized.values,
+        name="PC1 realized",
         mode="lines",
         line=dict(color="black", width=2),
-        hovertemplate="Fitted: %{y:.3f}<extra></extra>"
+        hovertemplate="PC1: %{y:.3f}<extra></extra>"
     ))
 
-    # Actual target return overlay
-    fig_contrib.add_trace(go.Scatter(
-        x=target_ser.index, y=target_ser.values,
-        name=f"Actual {target_ticker} return",
-        mode="lines",
-        line=dict(color="rgba(120,120,120,0.7)", width=1.5, dash="dot"),
-        hovertemplate="Actual: %{y:.3f}<extra></extra>"
-    ))
-
-    # Event markers: dates where |fitted| > rolling mean + 2σ
-    roll_mean = fitted.rolling(60, min_periods=20).mean()
-    roll_std  = fitted.rolling(60, min_periods=20).std()
+    # Event markers: dates where |PC1| > rolling mean + 2σ
+    roll_mean = pc1_realized.rolling(60, min_periods=20).mean()
+    roll_std  = pc1_realized.rolling(60, min_periods=20).std()
     threshold = roll_mean.abs() + 2 * roll_std
-    event_dates = fitted.index[np.abs(fitted.values) > threshold.values]
+    event_mask = np.abs(pc1_realized.values) > threshold.values
+    # guard against NaN in threshold
+    event_mask = event_mask & ~np.isnan(threshold.values)
+    event_dates = pc1_realized.index[event_mask]
 
     for ev_date in event_dates:
         fig_contrib.add_vline(
@@ -1019,17 +966,17 @@ with tab4:
 
     if len(event_dates) > 0:
         st.caption(
-            f"🔴 {len(event_dates)} regime event(s) flagged (|fitted| > 2σ from rolling mean): "
+            f"🔴 {len(event_dates)} regime event(s) flagged (|PC1| > 2σ rolling): "
             + ", ".join(d.strftime("%Y-%m") for d in event_dates[:8])
             + ("..." if len(event_dates) > 8 else "")
         )
 
     fig_contrib.update_layout(
         barmode="relative",
-        title=f"{target_ticker} — Factor Contribution Stack (β_k × F_k per period)",
+        title="PC1 — Ticker Contribution Stack (loading_j × return_j per period)",
         yaxis_title="Contribution (standardized units)",
         hovermode="x unified",
-        height=480,
+        height=500,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, font_size=10),
         plot_bgcolor="rgba(250,250,250,1)"
     )
