@@ -867,9 +867,14 @@ Moves against: {neg_str}
             title=f"{pc_label} — Rolling Correlation with Each Input",
             yaxis=dict(range=[-1, 1], title="Correlation"),
             hovermode="x unified",
-            height=340,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, font_size=10),
-            margin=dict(t=40, b=20)
+            height=380,
+            legend=dict(
+                orientation="h",
+                yanchor="top", y=-0.15,
+                xanchor="left", x=0,
+                font_size=10
+            ),
+            margin=dict(t=40, b=80)
         )
         st.plotly_chart(fig_lines, use_container_width=True)
 
