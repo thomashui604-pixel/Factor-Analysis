@@ -752,7 +752,10 @@ with tab3:
 
         # Label stability summary
         # For each window, what asset has the highest |corr|?
-        dominant_idx  = np.nanargmax(np.abs(corr_arr[:, k, :]), axis=1)
+        # Some windows may be all-NaN for this PC (not retained) — skip those.
+        pc_corr_k     = corr_arr[:, k, :]                          # (windows, N)
+        valid_rows    = ~np.all(np.isnan(pc_corr_k), axis=1)       # windows where PC k existed
+        dominant_idx  = np.nanargmax(np.abs(pc_corr_k[valid_rows]), axis=1)
         dominant_name = [avail_basket[i] for i in dominant_idx]
         from collections import Counter
         counts = Counter(dominant_name)
