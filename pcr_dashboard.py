@@ -596,7 +596,7 @@ st.markdown("---")
 # Tabs
 # ─────────────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab3, tab2, tab6, tab4, tab5 = st.tabs([
     "① Inputs",
     "② Factor Labels",
     "③ Factor Betas",
