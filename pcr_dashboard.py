@@ -5,13 +5,13 @@ Answers: "What latent macro forces are driving my target,
           and how have those exposures shifted over time?"
 
 Pipeline:
-  1. Download macro universe + target
+  1. Download macro inputs + target
   2. Compute log returns → vol-standardize
   3. For each rolling window:
-       a. PCA on basket → K latent factors
+       a. PCA on basket → K latent Factors
        b. Sign-align eigenvectors to first window (not just previous)
        c. OLS: target ~ factors → rolling betas
-       d. Record correlation of each PC with each basket asset (rolling labels)
+       d. Record correlation of each Factor with each input (rolling labels)
   4. Visualize: betas, labels, R², residuals, current snapshot
 
 What changed from v1:
@@ -21,7 +21,7 @@ What changed from v1:
   - Sign alignment anchors to first window, not just previous window,
     preventing sign drift over long samples.
   - Rolling label tracking in every window, not just the last.
-    This is the key diagnostic: does PC2 mean the same thing in 2019 as 2023?
+    This is the key diagnostic: does Factor 2 mean the same thing in 2019 as 2023?
   - R² gap (OLS vs PCR) retained as a truncation diagnostic.
   - Residual (idiosyncratic) return series added as its own panel.
 """
@@ -90,7 +90,7 @@ st.caption(
 # ─────────────────────────────────────────────────────────────────────────────
 st.sidebar.header("Configuration")
 
-st.sidebar.subheader("Universe")
+st.sidebar.subheader("Macro Inputs")
 st.sidebar.caption(
     "These are the macro risk factors PCA runs on. "
     "Each should proxy a distinct, economically meaningful dimension. "
@@ -100,14 +100,14 @@ st.sidebar.caption(
 
 DEFAULT_BASKET = "SPY, TLT, HYG, VIXY, UUP, GSG, IWM, IWF, IWD, EEM"
 ticker_input = st.sidebar.text_area(
-    "Macro Basket (comma-separated)",
+    "Macro Inputs (comma-separated)",
     value=DEFAULT_BASKET,
     help=(
         "SPY=equity  TLT=rates  HYG=credit  VIXY=vol  "
         "UUP=dollar  GSG=commodity  IWM=size  IWF=growth  IWD=value  EEM=EM"
     )
 )
-basket_tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
+input_tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
 
 target_ticker = st.sidebar.text_input(
     "Target Ticker",
@@ -171,7 +171,7 @@ vol_window = st.sidebar.selectbox(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("PC Truncation")
+st.sidebar.subheader("Factor Truncation")
 st.sidebar.caption(
     "Truncation is where the signal lives. Using ALL PCs is algebraically "
     "identical to OLS — the rotation cancels out. Keep only the PCs that "
@@ -190,9 +190,9 @@ truncation_method = st.sidebar.radio(
 
 if truncation_method == "Fixed N":
     n_fixed = st.sidebar.slider(
-        "Number of PCs to keep",
-        min_value=1, max_value=min(len(basket_tickers), 8),
-        value=min(3, len(basket_tickers)), step=1
+        "Number of Factors to keep",
+        min_value=1, max_value=min(len(input_tickers), 8),
+        value=min(3, len(input_tickers)), step=1
     )
     var_thresh = None
 else:
@@ -206,8 +206,8 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Dendrogram (diagnostic)")
 n_clusters = st.sidebar.slider(
     "Number of clusters",
-    min_value=2, max_value=min(8, len(basket_tickers)),
-    value=min(4, len(basket_tickers)), step=1
+    min_value=2, max_value=min(8, len(input_tickers)),
+    value=min(4, len(input_tickers)), step=1
 )
 
 run = st.sidebar.button("Run Analysis", type="primary", use_container_width=True)
@@ -265,12 +265,12 @@ def rolling_pca(std_basket: pd.DataFrame,
     """
     For each rolling window of `window` days:
 
-      1. PCA on the basket → K latent factors
+      1. PCA on the basket → K latent Factors
       2. Sign-align eigenvectors to the FIRST window (not just prev window)
          so betas are comparable across all time.
       3. OLS: target ~ factors → rolling betas
-      4. Record correlation of each PC with each basket asset (rolling labels).
-         This answers: "what does PC2 mean in June 2022 vs June 2019?"
+      4. Record correlation of each Factor with each input (rolling labels).
+         This answers: "what does Factor 2 mean in June 2022 vs June 2019?"
       5. Record R², residual, variance explained per PC.
 
     Output is a dict of time-indexed series / dataframes.
@@ -288,8 +288,8 @@ def rolling_pca(std_basket: pd.DataFrame,
     out_r2       = []
     out_r2_ols   = []
     out_resid    = []          # last-period residual in each window
-    out_var_exp  = []          # (K,) variance explained by each retained PC
-    out_pc_corr  = []          # (K, N) correlation of each PC with each asset
+    out_var_exp  = []          # (K,) variance explained by each retained Factor
+    out_pc_corr  = []          # (K, N) correlation of each Factor with each asset
     out_n_pcs    = []
     out_contribs     = []      # (K,) = beta_k * F_k(t) for last obs in window
     out_target       = []      # actual target return at time t (for overlay)
@@ -454,16 +454,16 @@ if not run:
 
     ### Pipeline
 
-    1. **Macro basket** — PCA runs on a set of economically distinct assets
+    1. **Macro Inputs** — PCA runs on a set of economically distinct assets
        (equity, rates, credit, vol, dollar, commodities, size, growth, value, EM).
-       These span genuinely different risk dimensions. Loading the basket with
+       These span genuinely different risk dimensions. Loading the inputs with
        correlated sector ETFs collapses everything into one equity factor.
 
     2. **Vol-standardize returns** — divide each return by its rolling std before PCA.
-       This prevents high-vol assets from dominating the first PC simply by being noisier.
+       This prevents high-vol inputs from dominating the first Factor simply by being noisier.
 
     3. **Rolling PCA** — in each window, eigendecompose the sample covariance matrix
-       of the basket. Extract K latent factors.
+       of the basket. Extract K latent Factors.
 
     4. **Sign alignment** — eigenvectors are only defined up to a sign flip.
        We anchor signs to the first window, so betas are comparable across all time.
@@ -472,8 +472,8 @@ if not run:
     5. **Regress target on factors** — OLS in each window gives rolling betas.
        These answer: "how much does ARKK load on the volatility factor right now?"
 
-    6. **Rolling label tracking** — in each window, correlate each PC with each
-       basket asset. This tracks whether PC2 means the same thing in 2019 as in 2023.
+    6. **Rolling label tracking** — in each window, correlate each Factor with each
+       input. This tracks whether Factor 2 means the same thing in 2019 as in 2023.
        Factor interpretation is not stable. This makes the instability visible.
 
     ---
@@ -481,7 +481,7 @@ if not run:
     ### Key outputs
 
     - **Rolling betas** — how the target's sensitivity to each latent factor changes over time
-    - **Rolling PC labels** — what each factor currently represents economically
+    - **Rolling Factor labels** — what each Factor currently represents economically
     - **R² vs OLS gap** — how much the truncation is filtering vs. a naive regression
     - **Residual** — the idiosyncratic component PCA doesn't explain (potential alpha)
     """)
@@ -492,21 +492,21 @@ if not run:
 # Run pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 with st.spinner("Downloading price data..."):
-    prices = load_data(basket_tickers, target_ticker, lookback_years, vol_window)
+    prices = load_data(input_tickers, target_ticker, lookback_years, vol_window)
 
 if prices is None or prices.empty:
     st.error("No price data returned. Check tickers or try again.")
     st.stop()
 
-avail_basket = [t for t in basket_tickers if t in prices.columns]
-missing      = [t for t in basket_tickers if t not in prices.columns]
+avail_inputs = [t for t in input_tickers if t in prices.columns]
+missing      = [t for t in input_tickers if t not in prices.columns]
 if target_ticker not in prices.columns:
     st.error(f"Target '{target_ticker}' not found in downloaded data.")
     st.stop()
 if missing:
     st.warning(f"Tickers not found: {', '.join(missing)}")
-if len(avail_basket) < 3:
-    st.error("Need at least 3 basket tickers with data.")
+if len(avail_inputs) < 3:
+    st.error("Need at least 3 inputs with data.")
     st.stop()
 
 with st.spinner("Computing standardized returns..."):
@@ -518,7 +518,7 @@ with st.spinner("Computing standardized returns..."):
     else:
         lr = lr_daily.resample(data_freq).sum().dropna(how="all")
     std  = vol_standardize(lr, vol_window)
-    std_basket = std[avail_basket].dropna(axis=1, how="all").dropna()
+    std_basket = std[avail_inputs].dropna(axis=1, how="all").dropna()
     std_target = std[target_ticker].dropna()
     common     = std_basket.index.intersection(std_target.index)
     std_basket = std_basket.loc[common]
@@ -555,28 +555,28 @@ contrib_arr = np.full((n_windows, n_pcs_max), np.nan)
 for i, c in enumerate(res["contribs"]):
     contrib_arr[i, :len(c)] = c
 
-pc_cols    = [f"PC{k+1}" for k in range(n_pcs_max)]
+pc_cols    = [f"Factor {k+1}" for k in range(n_pcs_max)]
 beta_df    = pd.DataFrame(betas_arr,   index=dates, columns=pc_cols)
 var_df     = pd.DataFrame(var_arr,     index=dates, columns=pc_cols)
 contrib_df = pd.DataFrame(contrib_arr, index=dates, columns=pc_cols)
 target_ser = pd.Series(res["target"],  index=dates, name="Target")
 
-# PC1 ticker-level contribution: loading_j * std_return_j(t) for each basket asset
+# Factor 1 input-level contribution: loading_j * std_return_j(t) for each input
 # This decomposes PC1 itself into what drove it each period.
 # Shape: (windows, n_assets)
 pc1_load_arr = np.vstack(res["pc1_loadings"])          # (windows, N)
-# align std_basket to window dates
+# align std inputs to window dates
 std_basket_at_dates = std_basket.reindex(dates).values  # (windows, N)
 pc1_ticker_contrib  = pc1_load_arr * std_basket_at_dates  # (windows, N) element-wise
 pc1_ticker_contrib_df = pd.DataFrame(
-    pc1_ticker_contrib, index=dates, columns=avail_basket
+    pc1_ticker_contrib, index=dates, columns=avail_inputs
 )
-# PC1 realized value = sum of ticker contributions (should equal factors[:,0])
+# Factor 1 realized value = sum of input contributions (should equal factors[:,0])
 pc1_realized = pc1_ticker_contrib_df.sum(axis=1)
 r2_ser     = pd.Series(res["r2"],     index=dates, name="R\u00b2")
 r2_ols_ser = pd.Series(res["r2_ols"], index=dates, name="OLS R\u00b2")
 resid_ser  = pd.Series(res["resid"],  index=dates, name="Residual")
-n_pcs_ser  = pd.Series(res["n_pcs"], index=dates, name="N PCs")
+n_pcs_ser  = pd.Series(res["n_pcs"], index=dates, name="N Factors")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -587,7 +587,7 @@ m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Target",          target_ticker)
 m2.metric("Avg R²",          f"{r2_ser.mean():.1%}")
 m3.metric("Latest R²",       f"{r2_ser.iloc[-1]:.1%}")
-m4.metric("Avg PCs used",    f"{n_pcs_ser.mean():.1f}")
+m4.metric("Avg Factors used",    f"{n_pcs_ser.mean():.1f}")
 m5.metric("Windows computed",f"{n_windows}")
 st.markdown("---")
 
@@ -596,9 +596,9 @@ st.markdown("---")
 # Tabs
 # ─────────────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab6, tab4, tab5 = st.tabs([
-    "🌐 Basket Diagnostic",
+    "🌐 Input Diagnostic",
     "📊 Rolling Factor Betas",
-    "🏷️ Rolling PC Labels",
+    "🏷️ Rolling Factor Labels",
     "📉 Factor Contribution Stack",
     "📈 R² & Residuals",
     "🔍 Current Snapshot",
@@ -606,18 +606,18 @@ tab1, tab2, tab3, tab6, tab4, tab5 = st.tabs([
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# TAB 1 — Basket diagnostic (correlation + dendrogram)
+# TAB 1 — Input Diagnostic (correlation + dendrogram)
 # ═══════════════════════════════════════════════════════════════════════════
 with tab1:
-    st.subheader("Basket Diagnostic: Correlation Structure")
+    st.subheader("Input Diagnostic: Correlation Structure")
     st.caption(
-        "This tab is purely diagnostic. It shows how the basket assets relate to each other. "
+        "This tab is purely diagnostic. It shows how the inputs relate to each other. "
         "If everything is highly correlated (>0.8), your PCA will be dominated by a single "
-        "market factor and the remaining PCs will be weak. Aim for a diverse basket."
+        "market factor and the remaining Factors will be weak. Aim for diverse inputs."
     )
 
-    recent_lr = lr[avail_basket].iloc[-vol_window:].dropna(axis=1, how="all")
-    good_cols = [c for c in avail_basket if c in recent_lr.columns and recent_lr[c].notna().sum() > 10]
+    recent_lr = lr[avail_inputs].iloc[-vol_window:].dropna(axis=1, how="all")
+    good_cols = [c for c in avail_inputs if c in recent_lr.columns and recent_lr[c].notna().sum() > 10]
 
     if len(good_cols) >= 3:
         corr_m = recent_lr[good_cols].corr()
@@ -626,7 +626,7 @@ with tab1:
         fig_corr = px.imshow(
             corr_m, text_auto=".2f",
             color_continuous_scale="RdBu_r", zmin=-1, zmax=1,
-            title=f"Basket Correlation Matrix (last {vol_window} days)"
+            title=f"Input Correlation Matrix (last {vol_window} days)"
         )
         fig_corr.update_layout(height=450)
         st.plotly_chart(fig_corr, use_container_width=True)
@@ -664,11 +664,11 @@ with tab1:
         mean_corr = all_corrs.mean()
         if mean_corr > 0.7:
             st.warning(
-                f"⚠️ Mean pairwise correlation is {mean_corr:.2f}. The basket is highly collinear. "
-                "PC1 will dominate. Consider replacing some assets with more orthogonal macro factors."
+                f"⚠️ Mean pairwise correlation across inputs is {mean_corr:.2f}. The inputs are highly collinear. "
+                "Factor 1 will dominate. Consider replacing some inputs with more orthogonal macro factors."
             )
         elif mean_corr > 0.4:
-            st.info(f"ℹ️ Mean pairwise correlation: {mean_corr:.2f}. Moderate collinearity — reasonable basket.")
+            st.info(f"ℹ️ Mean pairwise correlation: {mean_corr:.2f}. Moderate collinearity — reasonable set of inputs.")
         else:
             st.success(f"✅ Mean pairwise correlation: {mean_corr:.2f}. Good spread across risk dimensions.")
     else:
@@ -681,15 +681,15 @@ with tab1:
 with tab2:
     st.subheader(f"Rolling Factor Betas: {target_ticker}'s Sensitivity to Each Latent Factor")
     st.caption(
-        "Each line is a beta from regressing the target on one latent PC. "
+        "Each line is a beta from regressing the Target on one latent Factor. "
         "**This is the primary output.** "
-        "A rising PC1 beta means the target is becoming more sensitive to whatever PC1 represents. "
-        "Check Tab 3 to see what each PC represents at any given time."
+        "A rising Factor 1 beta means the Target is becoming more sensitive to whatever Factor 1 represents. "
+        "Check the Factor Labels tab to see what each Factor represents at any given time."
     )
 
     fig_betas = go.Figure()
     for k in range(n_pcs_max):
-        col = f"PC{k+1}"
+        col = f"Factor {k+1}"
         if beta_df[col].notna().any():
             fig_betas.add_trace(go.Scatter(
                 x=beta_df.index, y=beta_df[col],
@@ -716,7 +716,7 @@ with tab2:
     flat_cols = [c for row in cols_per_row for c in row]
 
     for k in range(n_pcs_max):
-        col  = f"PC{k+1}"
+        col  = f"Factor {k+1}"
         bser = beta_df[col].dropna()
         if bser.empty:
             continue
@@ -747,15 +747,15 @@ with tab2:
         flat_cols[k].plotly_chart(fig_k, use_container_width=True)
 
     # Variance explained
-    st.subheader("Variance Explained by Retained PCs (Universe Structure)")
+    st.subheader("Variance Explained by Retained Factors (Input Structure)")
     st.caption(
-        "Shows how much of the basket's total variance each retained PC explains. "
-        "PC1 dominance (>60%) means a one-factor world. "
+        "Shows how much of the inputs' total variance each retained Factor explains. "
+        "Factor 1 dominance (>60%) means a one-factor world. "
         "A flatter distribution means multiple orthogonal forces matter."
     )
     fig_var = go.Figure()
     for k in range(n_pcs_max):
-        col = f"PC{k+1}"
+        col = f"Factor {k+1}"
         if var_df[col].notna().any():
             fig_var.add_trace(go.Scatter(
                 x=var_df.index, y=var_df[col],
@@ -774,16 +774,16 @@ with tab2:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# TAB 3 — Rolling PC Labels
+# TAB 3 — Rolling Factor Labels
 # ═══════════════════════════════════════════════════════════════════════════
 with tab3:
-    st.subheader("What Is Each PC Capturing Over Time?")
+    st.subheader("What Is Each Factor Capturing Over Time?")
     st.caption(
-        "Lines show the rolling correlation between each PC and each basket asset. "
-        "Sign matters: a strong negative correlation means the PC moves *opposite* to that asset — "
+        "Lines show the rolling correlation between each Factor and each input. "
+        "Sign matters: a strong negative correlation means the Factor moves *opposite* to that input — "
         "it is still strongly related, but inversely. "
         "The interpretation panel below each chart uses signed averages to derive the "
-        "economic meaning of each PC."
+        "economic meaning of each Factor."
     )
 
     from collections import Counter
@@ -794,11 +794,11 @@ with tab3:
     ]
     asset_color_map = {
         asset: asset_color_list[j % len(asset_color_list)]
-        for j, asset in enumerate(avail_basket)
+        for j, asset in enumerate(avail_inputs)
     }
 
     for k in range(n_pcs_max):
-        pc_label  = f"PC{k+1}"
+        pc_label  = f"Factor {k+1}"
         pc_corr_k = corr_arr[:, k, :]
         valid_rows = ~np.all(np.isnan(pc_corr_k), axis=1)
 
@@ -814,10 +814,10 @@ with tab3:
         sort_idx  = np.argsort(mean_corr)[::-1]        # high → low
 
         # ── Directional interpretation ──
-        # Positive corr: PC moves WITH this asset
-        # Negative corr: PC moves AGAINST this asset (inversely)
-        pos_assets = [(avail_basket[i], mean_corr[i]) for i in sort_idx if mean_corr[i] >  0.3]
-        neg_assets = [(avail_basket[i], mean_corr[i]) for i in sort_idx if mean_corr[i] < -0.3]
+        # Positive corr: Factor moves WITH this input
+        # Negative corr: Factor moves AGAINST this input (inversely)
+        pos_assets = [(avail_inputs[i], mean_corr[i]) for i in sort_idx if mean_corr[i] >  0.3]
+        neg_assets = [(avail_inputs[i], mean_corr[i]) for i in sort_idx if mean_corr[i] < -0.3]
 
         st.markdown(f"### {pc_label}")
 
@@ -829,12 +829,12 @@ with tab3:
         strongest_pos = pos_assets[0][0]  if pos_assets else None
         strongest_neg = neg_assets[-1][0] if neg_assets else None  # most negative
 
-        if strongest_pos and abs(mean_corr[avail_basket.index(strongest_pos)]) >= 0.5:
-            direction_label = f"This PC moves **with {strongest_pos}**"
-        elif strongest_neg and abs(mean_corr[avail_basket.index(strongest_neg)]) >= 0.5:
-            direction_label = f"This PC moves **opposite to {strongest_neg}** (and the equity cluster)"
+        if strongest_pos and abs(mean_corr[avail_inputs.index(strongest_pos)]) >= 0.5:
+            direction_label = f"This Factor moves **with {strongest_pos}**"
+        elif strongest_neg and abs(mean_corr[avail_inputs.index(strongest_neg)]) >= 0.5:
+            direction_label = f"This Factor moves **opposite to {strongest_neg}** (and the equity cluster)"
         else:
-            direction_label = "No single asset strongly defines this PC"
+            direction_label = "No single asset strongly defines this Factor"
 
         st.markdown(f"""
 <div style="background:rgba(33,150,243,0.07); border-left:3px solid #2196F3;
@@ -849,7 +849,7 @@ Moves against: {neg_str}
 
         # ── Rolling correlation line chart ──
         fig_lines = go.Figure()
-        for j, asset in enumerate(avail_basket):
+        for j, asset in enumerate(avail_inputs):
             corr_col = valid_corrs[:, j]
             if np.isnan(corr_col).all():
                 continue
@@ -866,7 +866,7 @@ Moves against: {neg_str}
         fig_lines.add_hline(y=-0.5, line_dash="dash", line_color="rgba(150,150,150,0.35)",
                             annotation_text="-0.5", annotation_font_size=9)
         fig_lines.update_layout(
-            title=f"{pc_label} — Rolling Correlation with Each Basket Asset",
+            title=f"{pc_label} — Rolling Correlation with Each Input",
             yaxis=dict(range=[-1, 1], title="Correlation"),
             hovermode="x unified",
             height=340,
@@ -883,7 +883,7 @@ Moves against: {neg_str}
 
         # Sort assets by full-sample mean signed correlation (positive → negative)
         heatmap_z   = valid_corrs[:, sort_idx].T        # (N, windows)
-        heatmap_y   = [avail_basket[i] for i in sort_idx]
+        heatmap_y   = [avail_inputs[i] for i in sort_idx]
         heatmap_x   = valid_dates
 
         # Annotate: show value as text only on last window (rightmost column)
@@ -951,18 +951,18 @@ with tab4:
     fig_r2 = go.Figure()
     fig_r2.add_trace(go.Scatter(
         x=r2_ser.index, y=r2_ser.values,
-        name=f"PCR R² ({n_pcs_max} PCs max)",
+        name=f"Factor R² ({n_pcs_max} PCs max)",
         mode="lines", fill="tozeroy",
         line=dict(color="#2196F3", width=2),
         fillcolor="rgba(33,150,243,0.1)"
     ))
     fig_r2.add_trace(go.Scatter(
         x=r2_ols_ser.index, y=r2_ols_ser.values,
-        name="OLS R² (all basket tickers)",
+        name="OLS R² (all inputs)",
         mode="lines", line=dict(color="grey", dash="dash", width=1.5)
     ))
     fig_r2.add_hline(y=r2_ser.mean(), line_dash="dot", line_color="#2196F3",
-                     annotation_text=f"PCR mean: {r2_ser.mean():.1%}")
+                     annotation_text=f"Factor model mean: {r2_ser.mean():.1%}")
     fig_r2.update_layout(
         title=f"{target_ticker} — Rolling R²: PCR vs Naive OLS ({pca_window}d window)",
         yaxis=dict(range=[0, 1], title="R²", tickformat=".0%"),
@@ -972,7 +972,7 @@ with tab4:
     st.plotly_chart(fig_r2, use_container_width=True)
 
     st.caption(
-        "OLS R² is always ≥ PCR R² because OLS uses all degrees of freedom. "
+        "OLS R² is always ≥ Factor R² because OLS uses all degrees of freedom. "
         "The gap (shaded below) shows how much variance is coming from noisy higher-order PCs "
         "that PCR deliberately discards. A larger gap = more filtering happening."
     )
@@ -999,7 +999,7 @@ with tab4:
     fig_npcs = go.Figure()
     fig_npcs.add_trace(go.Scatter(
         x=n_pcs_ser.index, y=n_pcs_ser.values,
-        name="PCs retained", mode="lines",
+        name="Factors retained", mode="lines",
         line=dict(color="#4CAF50", shape="hv", width=2)
     ))
     fig_npcs.add_hline(
@@ -1007,8 +1007,8 @@ with tab4:
         annotation_text=f"All {n_assets} tickers (= OLS)"
     )
     fig_npcs.update_layout(
-        title="Number of PCs Retained Per Window",
-        yaxis=dict(title="N PCs", dtick=1),
+        title="Number of Factors Retained Per Window",
+        yaxis=dict(title="N Factors", dtick=1),
         hovermode="x unified", height=280
     )
     st.plotly_chart(fig_npcs, use_container_width=True)
@@ -1018,7 +1018,7 @@ with tab4:
     # Residual analysis
     st.subheader("Residual Returns — What Macro Factors Don't Explain")
     st.caption(
-        "The residual is the portion of the target's return not explained by the retained PCs. "
+        "The residual is the portion of the target's return not explained by the retained Factors. "
         "**Persistent positive drift = either alpha or a missing factor.** "
         "Mean-reverting residuals = idiosyncratic noise. "
         "Large, one-directional moves (2020, 2022) signal regime shifts the model missed."
@@ -1074,7 +1074,7 @@ with tab4:
 with tab5:
     st.subheader(f"Current Snapshot — {dates[-1].strftime('%Y-%m-%d')}")
     st.caption(
-        "The regime right now: what each PC currently represents, "
+        "The regime right now: what each Factor currently represents, "
         "what the target's exposure is, and how that compares to the full-sample average."
     )
 
@@ -1085,17 +1085,17 @@ with tab5:
         if np.isnan(latest_betas[k]):
             continue
 
-        pc_label   = f"PC{k+1}"
+        pc_label   = f"Factor {k+1}"
         beta_now   = latest_betas[k]
         beta_mean  = beta_df[pc_label].mean()
         beta_zscore = (beta_now - beta_mean) / beta_df[pc_label].std() if beta_df[pc_label].std() > 0 else 0
 
-        # Top 3 assets this PC correlates with right now
+        # Top 3 assets this Factor correlates with right now
         corr_row   = latest_corr[k]                       # (n_assets,)
         valid_idx  = [i for i in range(n_assets) if not np.isnan(corr_row[i])]
         top3_idx   = sorted(valid_idx, key=lambda i: abs(corr_row[i]), reverse=True)[:3]
         top3_str   = ", ".join(
-            f"**{avail_basket[i]}** ({corr_row[i]:+.2f})"
+            f"**{avail_inputs[i]}** ({corr_row[i]:+.2f})"
             for i in top3_idx
         )
 
@@ -1121,7 +1121,7 @@ with tab5:
                 value=f"{var_now:.1%}" if not np.isnan(var_now) else "—"
             )
 
-            # Beta history for this PC
+            # Beta history for this Factor
             bser_full = beta_df[pc_label].dropna()
             fig_snap = go.Figure()
             fig_snap.add_trace(go.Scatter(
@@ -1153,7 +1153,7 @@ with tab5:
         st.markdown(f"""
 | Parameter | Value |
 |---|---|
-| Basket tickers | {', '.join(avail_basket)} |
+| Macro inputs | {', '.join(avail_inputs)} |
 | Target | {target_ticker} |
 | Data frequency | {freq_label} |
 | Rolling window | {pca_window} {win_label} |
@@ -1191,19 +1191,19 @@ with tab6:
             FACTOR DECOMPOSITION
         </div>
         <div style="font-size:1.9rem; font-weight:700; color:#ffffff; letter-spacing:-0.01em; margin-bottom:4px;">
-            PC1 Contribution Stack
+            Factor 1 Contribution Stack
         </div>
         <div style="font-size:0.88rem; color:rgba(255,255,255,0.45); line-height:1.6;">
-            What drove the dominant macro factor each period — decomposed into basket assets.<br>
+            What drove the dominant macro factor each period — decomposed into inputs.<br>
             <span style="color:#6c8ebf;">Bars</span> = loading_j × return_j(t) &nbsp;·&nbsp;
-            <span style="color:#ffffff;">Line</span> = β₁ × F₁(t) &nbsp;(target's PC1 exposure) &nbsp;·&nbsp;
+            <span style="color:#ffffff;">Line</span> = β₁ × F₁(t) &nbsp;(Target's Factor 1 exposure) &nbsp;·&nbsp;
             <span style="color:#e05252;">Verticals</span> = regime events &gt; 2σ
         </div>
     </div>
     """, unsafe_allow_html=True)
 
     # ── Metrics row ──
-    target_pc1_fitted = contrib_df["PC1"].reindex(pc1_ticker_contrib_df.index)
+    target_pc1_fitted = contrib_df["Factor 1"].reindex(pc1_ticker_contrib_df.index)
     pc1_vol   = target_pc1_fitted.std()
     pc1_range = target_pc1_fitted.max() - target_pc1_fitted.min()
 
@@ -1214,13 +1214,13 @@ with tab6:
     event_mask_m = event_mask_m & ~np.isnan(threshold_m.values)
     event_dates_m = target_pc1_fitted.index[event_mask_m]
 
-    # Dominant basket asset over full sample
+    # Dominant input over full sample
     mean_abs_contrib = pc1_ticker_contrib_df.abs().mean()
     dominant_ticker  = mean_abs_contrib.idxmax()
 
     mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric("PC1 vol (σ)",        f"{pc1_vol:.3f}")
-    mc2.metric("PC1 range",          f"{pc1_range:.3f}")
+    mc1.metric("Factor 1 vol (σ)",        f"{pc1_vol:.3f}")
+    mc2.metric("Factor 1 range",          f"{pc1_range:.3f}")
     mc3.metric("Regime events",      f"{event_mask_m.sum()}")
     mc4.metric("Dominant driver",    dominant_ticker)
 
@@ -1233,13 +1233,13 @@ with tab6:
     ]
     ticker_color_map = {
         asset: ticker_palette[j % len(ticker_palette)]
-        for j, asset in enumerate(avail_basket)
+        for j, asset in enumerate(avail_inputs)
     }
 
     # ── Build figure ──
     fig_c = go.Figure()
 
-    for j, asset in enumerate(avail_basket):
+    for j, asset in enumerate(avail_inputs):
         color = ticker_color_map[asset]
         col   = pc1_ticker_contrib_df[asset]
 
@@ -1254,7 +1254,7 @@ with tab6:
             hovertemplate=f"<b>{asset}</b>: %{{y:.3f}}<extra></extra>"
         ))
 
-    # Target PC1 fitted line — bright white, thick
+    # Target Factor 1 fitted line — bright white, thick
     fig_c.add_trace(go.Scatter(
         x=target_pc1_fitted.index,
         y=target_pc1_fitted.values,
@@ -1298,7 +1298,7 @@ with tab6:
         plot_bgcolor="rgba(22,22,46,1)",
         font=dict(color="rgba(255,255,255,0.75)", size=11),
         title=dict(
-            text=f"<b>PC1 Decomposition</b>  ·  basket drivers vs {target_ticker} exposure",
+            text=f"<b>Factor 1 Decomposition</b>  ·  input drivers vs {target_ticker} exposure",
             font=dict(color="white", size=15),
             x=0.0, xanchor="left"
         ),
