@@ -806,42 +806,74 @@ with tab3:
         valid_dates = [d for d, v in zip(dates, valid_rows) if v]
         valid_corrs = pc_corr_k[valid_rows]         # (windows, N) — signed
 
-        # ── Mean signed correlation per asset over all valid windows ──
-        mean_corr = np.nanmean(valid_corrs, axis=0)   # (N,)
-        # Sort by signed value for bar chart
-        sort_idx  = np.argsort(mean_corr)[::-1]        # high → low
+        # ── Correlation stats: current (last window) vs early (first 20% of windows) ──
+        n_valid      = len(valid_corrs)
+        early_n      = max(1, n_valid // 5)
+        early_corr   = np.nanmean(valid_corrs[:early_n], axis=0)   # (N,) first 20%
+        current_corr = valid_corrs[-1]                              # (N,) last window
+        mean_corr    = np.nanmean(valid_corrs, axis=0)              # (N,) full sample
+        sort_idx     = np.argsort(current_corr)[::-1]               # sort by CURRENT, not mean
 
-        # ── Directional interpretation ──
-        # Positive corr: Factor moves WITH this input
-        # Negative corr: Factor moves AGAINST this input (inversely)
-        pos_assets = [(avail_inputs[i], mean_corr[i]) for i in sort_idx if mean_corr[i] >  0.3]
-        neg_assets = [(avail_inputs[i], mean_corr[i]) for i in sort_idx if mean_corr[i] < -0.3]
+        # ── Detect significant flips ──
+        # A flip = early and current correlations have opposite signs AND
+        # at least one of them is meaningful (|corr| > 0.3)
+        FLIP_THRESH = 0.3
+        flipped = []
+        for j, asset in enumerate(avail_inputs):
+            e, c = early_corr[j], current_corr[j]
+            if np.isnan(e) or np.isnan(c):
+                continue
+            if np.sign(e) != np.sign(c) and (abs(e) > FLIP_THRESH or abs(c) > FLIP_THRESH):
+                direction = "negative → positive" if c > 0 else "positive → negative"
+                flipped.append((asset, e, c, direction))
+        # Sort flips by magnitude of change
+        flipped.sort(key=lambda x: abs(x[2] - x[1]), reverse=True)
+
+        # ── Current regime label ──
+        pos_now = [(avail_inputs[i], current_corr[i]) for i in sort_idx if current_corr[i] >  0.3]
+        neg_now = [(avail_inputs[i], current_corr[i]) for i in sort_idx if current_corr[i] < -0.3]
+
+        strongest_pos_now = pos_now[0][0]  if pos_now else None
+        strongest_neg_now = neg_now[-1][0] if neg_now else None
+
+        if strongest_pos_now and abs(current_corr[avail_inputs.index(strongest_pos_now)]) >= 0.5:
+            direction_label = f"Currently moves <b>with {strongest_pos_now}</b>"
+        elif strongest_neg_now and abs(current_corr[avail_inputs.index(strongest_neg_now)]) >= 0.5:
+            direction_label = f"Currently moves <b>opposite to {strongest_neg_now}</b>"
+        else:
+            direction_label = "No single input strongly defines this Factor right now"
+
+        pos_str = ", ".join(f"<b>{a}</b> ({v:+.2f})" for a, v in pos_now) or "none above +0.3"
+        neg_str = ", ".join(f"<b>{a}</b> ({v:+.2f})" for a, v in neg_now[::-1]) or "none below -0.3"
+
+        # ── Flip lines ──
+        if flipped:
+            flip_lines = "".join(
+                f"<li><b>{a}</b>: {d} &nbsp;<span style='color:#888;'>({e:+.2f} → {c:+.2f})</span></li>"
+                for a, e, c, d in flipped[:4]
+            )
+            flip_html = f"""
+<div style="margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.08);">
+  <span style="color:#FFB74D; font-size:0.82rem;">⚡ Character shifts since start of sample:</span>
+  <ul style="margin:4px 0 0 0; padding-left:16px; color:#aaa; font-size:0.82rem; line-height:1.7;">
+    {flip_lines}
+  </ul>
+</div>"""
+        else:
+            flip_html = '<div style="margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.08);"><span style="color:#888; font-size:0.82rem;">No significant sign flips detected — Factor character is stable.</span></div>'
 
         st.markdown(f"### {pc_label}")
-
-        # ── Interpretation card ──
-        pos_str = ", ".join(f"**{a}** ({v:+.2f})" for a, v in pos_assets) or "none above 0.3"
-        neg_str = ", ".join(f"**{a}** ({v:+.2f})" for a, v in neg_assets[::-1]) or "none below -0.3"
-
-        # Derive a plain-English label from the strongest signed driver
-        strongest_pos = pos_assets[0][0]  if pos_assets else None
-        strongest_neg = neg_assets[-1][0] if neg_assets else None  # most negative
-
-        if strongest_pos and abs(mean_corr[avail_inputs.index(strongest_pos)]) >= 0.5:
-            direction_label = f"This Factor moves **with {strongest_pos}**"
-        elif strongest_neg and abs(mean_corr[avail_inputs.index(strongest_neg)]) >= 0.5:
-            direction_label = f"This Factor moves **opposite to {strongest_neg}** (and the equity cluster)"
-        else:
-            direction_label = "No single asset strongly defines this Factor"
-
         st.markdown(f"""
 <div style="background:rgba(33,150,243,0.07); border-left:3px solid #2196F3;
             border-radius:4px; padding:12px 16px; margin-bottom:12px; font-size:0.88rem;">
-<b>Interpretation:</b> {direction_label}<br>
-<span style="color:#aaa;">
-Moves with: {pos_str}<br>
-Moves against: {neg_str}
-</span>
+  <div style="margin-bottom:6px;">{direction_label}
+    <span style="color:#888; font-size:0.78rem; margin-left:8px;">(as of most recent window)</span>
+  </div>
+  <div style="color:#aaa; line-height:1.7;">
+    Moves with: {pos_str}<br>
+    Moves against: {neg_str}
+  </div>
+  {flip_html}
 </div>
 """, unsafe_allow_html=True)
 
