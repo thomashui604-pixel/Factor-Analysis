@@ -118,23 +118,55 @@ target_ticker = st.sidebar.text_input(
 st.sidebar.markdown("---")
 st.sidebar.subheader("Parameters")
 
-lookback_years = st.sidebar.slider(
-    "Data Lookback (years)", min_value=2, max_value=10, value=5, step=1
+freq_label = st.sidebar.radio(
+    "Data Frequency",
+    options=["Daily", "Weekly", "Monthly"],
+    index=0,
+    horizontal=True,
+    help=(
+        "Daily = most granular, noisiest. "
+        "Weekly = smoother, reduces microstructure noise. "
+        "Monthly = regime-level only, fewest observations."
+    )
+)
+FREQ_MAP = {"Daily": "B", "Weekly": "W-FRI", "Monthly": "ME"}
+data_freq = FREQ_MAP[freq_label]
+
+lookback_years = st.sidebar.select_slider(
+    "Data Lookback (years)",
+    options=[1, 2, 3, 5, 7, 10],
+    value=5,
+    help="1 year gives ~252 daily / ~52 weekly / ~12 monthly observations."
 )
 
+# Window labels adapt to frequency
+FREQ_WINDOW_LABEL = {"Daily": "trading days", "Weekly": "weeks", "Monthly": "months"}
+win_label = FREQ_WINDOW_LABEL[freq_label]
+
+WINDOW_DEFAULTS  = {"Daily": 60,  "Weekly": 26,  "Monthly": 12}
+WINDOW_MINS      = {"Daily": 20,  "Weekly": 8,   "Monthly": 6}
+WINDOW_MAXS      = {"Daily": 120, "Weekly": 52,  "Monthly": 24}
+WINDOW_STEPS     = {"Daily": 5,   "Weekly": 2,   "Monthly": 1}
+
 pca_window = st.sidebar.slider(
-    "Rolling Window (trading days)",
-    min_value=20, max_value=120, value=60, step=5,
+    f"Rolling Window ({win_label})",
+    min_value=WINDOW_MINS[freq_label],
+    max_value=WINDOW_MAXS[freq_label],
+    value=WINDOW_DEFAULTS[freq_label],
+    step=WINDOW_STEPS[freq_label],
     help=(
-        "How many days per rolling window. "
-        "60d ≈ 3 months (regime-sensitive). "
-        "120d ≈ 6 months (smoother, slower)."
+        "How many periods per rolling window. "
+        "Shorter = more regime-sensitive. Longer = smoother, more stable."
     )
 )
 
+VOL_WIN_OPTIONS  = {"Daily": [21, 63, 126, 252], "Weekly": [4, 13, 26, 52], "Monthly": [3, 6, 12]}
+VOL_WIN_DEFAULTS = {"Daily": 1, "Weekly": 1, "Monthly": 1}
+
 vol_window = st.sidebar.selectbox(
-    "Vol-Standardization Window (days)",
-    options=[21, 63, 126, 252], index=1,
+    f"Vol-Standardization Window ({win_label})",
+    options=VOL_WIN_OPTIONS[freq_label],
+    index=VOL_WIN_DEFAULTS[freq_label],
     help="Window for computing rolling std used to normalize returns before PCA."
 )
 
@@ -478,7 +510,13 @@ if len(avail_basket) < 3:
     st.stop()
 
 with st.spinner("Computing standardized returns..."):
-    lr   = log_returns(prices)
+    lr_daily = log_returns(prices)
+    # Resample to chosen frequency before PCA.
+    # For weekly/monthly we sum log returns (additive), then vol-standardize.
+    if data_freq == "B":
+        lr = lr_daily
+    else:
+        lr = lr_daily.resample(data_freq).sum().dropna(how="all")
     std  = vol_standardize(lr, vol_window)
     std_basket = std[avail_basket].dropna(axis=1, how="all").dropna()
     std_target = std[target_ticker].dropna()
@@ -557,13 +595,13 @@ st.markdown("---")
 # ─────────────────────────────────────────────────────────────────────────────
 # Tabs
 # ─────────────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab6, tab4, tab5 = st.tabs([
     "🌐 Basket Diagnostic",
     "📊 Rolling Factor Betas",
     "🏷️ Rolling PC Labels",
+    "📉 Factor Contribution Stack",
     "📈 R² & Residuals",
     "🔍 Current Snapshot",
-    "📉 Factor Contribution Stack",
 ])
 
 
@@ -1038,8 +1076,9 @@ with tab5:
 |---|---|
 | Basket tickers | {', '.join(avail_basket)} |
 | Target | {target_ticker} |
-| Rolling window | {pca_window} days |
-| Vol-standardization window | {vol_window} days |
+| Data frequency | {freq_label} |
+| Rolling window | {pca_window} {win_label} |
+| Vol-standardization window | {vol_window} {win_label} |
 | Truncation | {'Fixed: ' + str(n_fixed) + ' PCs' if n_fixed else f'Variance ≥ {var_thresh:.0%}'} |
 | Data lookback | {lookback_years} years |
 | Windows computed | {n_windows} |
@@ -1139,7 +1178,7 @@ with tab6:
             name=asset,
             marker=dict(color=color, opacity=0.88, line=dict(width=0)),
             legendgroup=asset, showlegend=False,
-            hovertemplate=f"<b>{asset}</b>: %{{y:.3f}}<extra></extra>"
+            hoverinfo="skip"
         ))
 
     # Target PC1 fitted line — bright white, thick
