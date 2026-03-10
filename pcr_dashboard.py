@@ -596,24 +596,6 @@ st.markdown("---")
 # Tabs
 # ─────────────────────────────────────────────────────────────────────────────
 
-def step_banner(n, title, question, next_tab=None):
-    """Render a compact step header that orients the user in the analysis flow."""
-    next_hint = f"<span style='color:#888; font-size:0.75rem;'>Next → {next_tab}</span>" if next_tab else ""
-    st.markdown(f"""
-<div style="display:flex; align-items:baseline; gap:12px; margin-bottom:4px;">
-  <span style="font-size:1.05rem; font-weight:700; color:#2196F3; font-family:monospace;">
-    Step {n} of 6
-  </span>
-  <span style="font-size:1.25rem; font-weight:700; color:#fff;">{title}</span>
-  {next_hint}
-</div>
-<div style="font-size:0.88rem; color:#aaa; margin-bottom:16px; border-left:3px solid #2196F3;
-            padding-left:10px; line-height:1.5;">
-  🎯 <em>{question}</em>
-</div>
-""", unsafe_allow_html=True)
-
-
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "① Inputs",
     "② Factor Labels",
@@ -628,10 +610,11 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 # TAB 1 — Input Diagnostic (correlation + dendrogram)
 # ═══════════════════════════════════════════════════════════════════════════
 with tab1:
-    step_banner(1, "Inputs",
-        "Are my macro inputs diverse enough to produce meaningful factors? "
-        "If inputs cluster together, PCA will extract one dominant factor and noise.",
-        next_tab="Factor Labels"
+    st.subheader("Input Diagnostic: Correlation Structure")
+    st.caption(
+        "This tab is purely diagnostic. It shows how the macro inputs relate to each other. "
+        "If everything is highly correlated (>0.8), PCA will be dominated by a single "
+        "market factor and the remaining Factors will be weak. Aim for diverse inputs."
     )
 
     recent_lr = lr[avail_inputs].iloc[-vol_window:].dropna(axis=1, how="all")
@@ -697,11 +680,11 @@ with tab1:
 # TAB 2 — Rolling Factor Betas
 # ═══════════════════════════════════════════════════════════════════════════
 with tab2:
-    step_banner(3, "Factor Betas",
-        f"How sensitive is {target_ticker} to each Factor — and how has that changed? "
-        "A persistently negative Factor 1 beta means the Target moves opposite to that Factor. "
-        "Cross-reference with Factor Labels to interpret what each beta means economically.",
-        next_tab="Factor 1 Breakdown"
+    st.subheader(f"{target_ticker} — Sensitivity to Each Latent Factor")
+    st.caption(
+        "Each line is a rolling beta from regressing the Target on one latent Factor. "
+        "A persistently negative beta means the Target moves opposite to that Factor. "
+        "Cross-reference with the Factor Labels tab to interpret each beta economically."
     )
 
     fig_betas = go.Figure()
@@ -794,11 +777,11 @@ with tab2:
 # TAB 3 — Rolling Factor Labels
 # ═══════════════════════════════════════════════════════════════════════════
 with tab3:
-    step_banner(2, "Factor Labels",
-        "What does each extracted Factor actually represent — and has that changed over time? "
-        "A Factor's economic label (equity risk, rates, vol) is only trustworthy if it is stable. "
-        "Regime shifts show up as color transitions in the heatmap.",
-        next_tab="Factor Betas"
+    st.subheader("What Is Each Factor Capturing Over Time?")
+    st.caption(
+        "Lines show the rolling correlation between each Factor and each input. "
+        "Sign matters: a strong negative correlation means the Factor moves opposite to that input. "
+        "The heatmap below shows regime shifts — color transitions indicate a change in Factor character."
     )
 
     from collections import Counter
@@ -960,12 +943,7 @@ Moves against: {neg_str}
 # TAB 4 — R² and Residuals
 # ═══════════════════════════════════════════════════════════════════════════
 with tab4:
-    step_banner(5, "Fit & Residuals",
-        "How well do the Factors explain the Target — and what's left over? "
-        "High R² means the macro inputs captured most of the move. "
-        "Persistent cumulative residual drift signals either alpha or a missing factor.",
-        next_tab="Current Regime"
-    )
+    st.subheader("Model Fit: R² and Residual Analysis")
 
     # Rolling R²
     fig_r2 = go.Figure()
@@ -1092,10 +1070,10 @@ with tab4:
 # TAB 5 — Current Snapshot
 # ═══════════════════════════════════════════════════════════════════════════
 with tab5:
-    step_banner(6, "Current Regime",
-        f"Where are we right now? What does each Factor currently represent, "
-        f"what is {target_ticker}'s live exposure, and is that exposure elevated relative to history?",
-        next_tab=None
+    st.subheader(f"Current Regime — {dates[-1].strftime('%Y-%m-%d')}")
+    st.caption(
+        "What each Factor currently represents, the Target's live exposure to each, "
+        "and whether that exposure is elevated or depressed relative to its own history."
     )
 
     latest_corr = corr_arr[-1]    # (n_pcs_max, n_assets)
@@ -1188,12 +1166,6 @@ with tab5:
 # TAB 6 — Factor Contribution Stack
 # ═══════════════════════════════════════════════════════════════════════════
 with tab6:
-    step_banner(4, "Factor 1 Breakdown",
-        "When Factor 1 moved, which inputs were responsible? "
-        "The stacked bars decompose Factor 1 into its input-level drivers each period. "
-        "The black line shows how much of that move the Target actually absorbed.",
-        next_tab="Fit & Residuals"
-    )
 
     # ── Dark theme styling for this tab ──
     st.markdown("""
