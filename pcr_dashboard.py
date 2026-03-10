@@ -900,11 +900,14 @@ with tab4:
     # ── PC1 Ticker Contribution Stack ──
     st.subheader("PC1 Ticker Contribution Stack")
     st.caption(
-        "This decomposes **PC1 itself** into what drove it each period — in actual ticker terms. "
-        "Each bar is **loading_j × ticker_return_j(t)**: the eigenvector weight times that "
-        "asset's standardized return. Bars stack to equal PC1's realized value (black line). "
-        "This answers: *when PC1 moved, which basket assets were responsible?* "
-        "Regime events (|PC1| > 2σ rolling) are flagged with red dashed lines."
+        "Bars show **loading_j × ticker_return_j(t)** for each basket asset — "
+        "what drove PC1 each period in actual ticker terms. "
+        "The **black line** is the target's PC1-fitted return: β₁ × F₁(t). "
+        "The **gap between the stack and the black line** is the residual: "
+        "PC1 moved by this much, but the target only captured β₁ of it. "
+        "Wide gaps = PC1 was a poor explainer of the target that period. "
+        "Tight tracking = PC1 dominated the target's move. "
+        "Red dashed lines flag regime events where the target's PC1 exposure exceeded 2σ."
     )
 
     ticker_colors = [
@@ -940,23 +943,27 @@ with tab4:
             hovertemplate=f"{asset}: %{{y:.3f}}<extra></extra>"
         ))
 
-    # PC1 realized value (black line) — should equal sum of contributions
+    # Target's PC1-fitted value: β₁ × F₁(t)
+    # This is what the target actually contributed from PC1 — not basket PC1 itself.
+    # The gap between this line and the stack is the residual: basket PC1 moved,
+    # but the target only captured part of it (scaled by β₁).
+    target_pc1_fitted = contrib_df["PC1"].reindex(pc1_ticker_contrib_df.index)
+
     fig_contrib.add_trace(go.Scatter(
-        x=pc1_realized.index, y=pc1_realized.values,
-        name="PC1 realized",
+        x=target_pc1_fitted.index, y=target_pc1_fitted.values,
+        name=f"{target_ticker} fitted from PC1 (β₁ × F₁)",
         mode="lines",
         line=dict(color="black", width=2),
-        hovertemplate="PC1: %{y:.3f}<extra></extra>"
+        hovertemplate="Target PC1 fitted: %{y:.3f}<extra></extra>"
     ))
 
-    # Event markers: dates where |PC1| > rolling mean + 2σ
-    roll_mean = pc1_realized.rolling(60, min_periods=20).mean()
-    roll_std  = pc1_realized.rolling(60, min_periods=20).std()
+    # Event markers: dates where |target PC1 fitted| > rolling mean + 2σ
+    roll_mean = target_pc1_fitted.rolling(60, min_periods=20).mean()
+    roll_std  = target_pc1_fitted.rolling(60, min_periods=20).std()
     threshold = roll_mean.abs() + 2 * roll_std
-    event_mask = np.abs(pc1_realized.values) > threshold.values
-    # guard against NaN in threshold
+    event_mask = np.abs(target_pc1_fitted.values) > threshold.values
     event_mask = event_mask & ~np.isnan(threshold.values)
-    event_dates = pc1_realized.index[event_mask]
+    event_dates = target_pc1_fitted.index[event_mask]
 
     for ev_date in event_dates:
         fig_contrib.add_vline(
