@@ -557,12 +557,13 @@ st.markdown("---")
 # ─────────────────────────────────────────────────────────────────────────────
 # Tabs
 # ─────────────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🌐 Basket Diagnostic",
     "📊 Rolling Factor Betas",
     "🏷️ Rolling PC Labels",
     "📈 R² & Residuals",
     "🔍 Current Snapshot",
+    "📉 Factor Contribution Stack",
 ])
 
 
@@ -897,100 +898,6 @@ with tab4:
 
     st.markdown("---")
 
-    # ── PC1 Ticker Contribution Stack ──
-    st.subheader("PC1 Ticker Contribution Stack")
-    st.caption(
-        "Bars show **loading_j × ticker_return_j(t)** for each basket asset — "
-        "what drove PC1 each period in actual ticker terms. "
-        "The **black line** is the target's PC1-fitted return: β₁ × F₁(t). "
-        "The **gap between the stack and the black line** is the residual: "
-        "PC1 moved by this much, but the target only captured β₁ of it. "
-        "Wide gaps = PC1 was a poor explainer of the target that period. "
-        "Tight tracking = PC1 dominated the target's move. "
-        "Red dashed lines flag regime events where the target's PC1 exposure exceeded 2σ."
-    )
-
-    ticker_colors = [
-        "#2196F3", "#FF5722", "#4CAF50", "#9C27B0", "#FF9800",
-        "#00BCD4", "#E91E63", "#8BC34A", "#795548", "#607D8B"
-    ]
-
-    fig_contrib = go.Figure()
-
-    for j, asset in enumerate(avail_basket):
-        color = ticker_colors[j % len(ticker_colors)]
-        contrib_col = pc1_ticker_contrib_df[asset]
-        # Positive slice
-        fig_contrib.add_trace(go.Bar(
-            x=pc1_ticker_contrib_df.index,
-            y=contrib_col.clip(lower=0),
-            name=asset,
-            marker_color=color,
-            opacity=0.85,
-            legendgroup=asset,
-            showlegend=True,
-            hovertemplate=f"{asset}: %{{y:.3f}}<extra></extra>"
-        ))
-        # Negative slice (same color, no duplicate legend)
-        fig_contrib.add_trace(go.Bar(
-            x=pc1_ticker_contrib_df.index,
-            y=contrib_col.clip(upper=0),
-            name=asset,
-            marker_color=color,
-            opacity=0.85,
-            legendgroup=asset,
-            showlegend=False,
-            hovertemplate=f"{asset}: %{{y:.3f}}<extra></extra>"
-        ))
-
-    # Target's PC1-fitted value: β₁ × F₁(t)
-    # This is what the target actually contributed from PC1 — not basket PC1 itself.
-    # The gap between this line and the stack is the residual: basket PC1 moved,
-    # but the target only captured part of it (scaled by β₁).
-    target_pc1_fitted = contrib_df["PC1"].reindex(pc1_ticker_contrib_df.index)
-
-    fig_contrib.add_trace(go.Scatter(
-        x=target_pc1_fitted.index, y=target_pc1_fitted.values,
-        name=f"{target_ticker} fitted from PC1 (β₁ × F₁)",
-        mode="lines",
-        line=dict(color="black", width=2),
-        hovertemplate="Target PC1 fitted: %{y:.3f}<extra></extra>"
-    ))
-
-    # Event markers: dates where |target PC1 fitted| > rolling mean + 2σ
-    roll_mean = target_pc1_fitted.rolling(60, min_periods=20).mean()
-    roll_std  = target_pc1_fitted.rolling(60, min_periods=20).std()
-    threshold = roll_mean.abs() + 2 * roll_std
-    event_mask = np.abs(target_pc1_fitted.values) > threshold.values
-    event_mask = event_mask & ~np.isnan(threshold.values)
-    event_dates = target_pc1_fitted.index[event_mask]
-
-    for ev_date in event_dates:
-        fig_contrib.add_vline(
-            x=ev_date,
-            line_dash="dash", line_color="rgba(220,50,50,0.6)", line_width=1,
-        )
-
-    if len(event_dates) > 0:
-        st.caption(
-            f"🔴 {len(event_dates)} regime event(s) flagged (|PC1| > 2σ rolling): "
-            + ", ".join(d.strftime("%Y-%m") for d in event_dates[:8])
-            + ("..." if len(event_dates) > 8 else "")
-        )
-
-    fig_contrib.update_layout(
-        barmode="relative",
-        title="PC1 — Ticker Contribution Stack (loading_j × return_j per period)",
-        yaxis_title="Contribution (standardized units)",
-        hovermode="x unified",
-        height=500,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, font_size=10),
-        plot_bgcolor="rgba(250,250,250,1)"
-    )
-    st.plotly_chart(fig_contrib, use_container_width=True)
-
-    st.markdown("---")
-
     # Residual analysis
     st.subheader("Residual Returns — What Macro Factors Don't Explain")
     st.caption(
@@ -1137,3 +1044,195 @@ with tab5:
 | Data lookback | {lookback_years} years |
 | Windows computed | {n_windows} |
         """)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TAB 6 — Factor Contribution Stack
+# ═══════════════════════════════════════════════════════════════════════════
+with tab6:
+
+    # ── Dark theme styling for this tab ──
+    st.markdown("""
+    <style>
+    [data-testid="stVerticalBlock"] .factor-header {
+        font-family: 'Georgia', serif;
+        letter-spacing: 0.05em;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div style="
+        background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
+        border-radius: 12px;
+        padding: 28px 32px 20px 32px;
+        margin-bottom: 24px;
+        border: 1px solid rgba(255,255,255,0.07);
+    ">
+        <div style="font-size:0.72rem; letter-spacing:0.15em; color:#6c8ebf; text-transform:uppercase; margin-bottom:6px;">
+            FACTOR DECOMPOSITION
+        </div>
+        <div style="font-size:1.9rem; font-weight:700; color:#ffffff; letter-spacing:-0.01em; margin-bottom:4px;">
+            PC1 Contribution Stack
+        </div>
+        <div style="font-size:0.88rem; color:rgba(255,255,255,0.45); line-height:1.6;">
+            What drove the dominant macro factor each period — decomposed into basket assets.<br>
+            <span style="color:#6c8ebf;">Bars</span> = loading_j × return_j(t) &nbsp;·&nbsp;
+            <span style="color:#ffffff;">Line</span> = β₁ × F₁(t) &nbsp;(target's PC1 exposure) &nbsp;·&nbsp;
+            <span style="color:#e05252;">Verticals</span> = regime events &gt; 2σ
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Metrics row ──
+    target_pc1_fitted = contrib_df["PC1"].reindex(pc1_ticker_contrib_df.index)
+    pc1_vol   = target_pc1_fitted.std()
+    pc1_range = target_pc1_fitted.max() - target_pc1_fitted.min()
+
+    roll_mean_m = target_pc1_fitted.rolling(60, min_periods=20).mean()
+    roll_std_m  = target_pc1_fitted.rolling(60, min_periods=20).std()
+    threshold_m = roll_mean_m.abs() + 2 * roll_std_m
+    event_mask_m = np.abs(target_pc1_fitted.values) > threshold_m.values
+    event_mask_m = event_mask_m & ~np.isnan(threshold_m.values)
+    event_dates_m = target_pc1_fitted.index[event_mask_m]
+
+    # Dominant basket asset over full sample
+    mean_abs_contrib = pc1_ticker_contrib_df.abs().mean()
+    dominant_ticker  = mean_abs_contrib.idxmax()
+
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("PC1 vol (σ)",        f"{pc1_vol:.3f}")
+    mc2.metric("PC1 range",          f"{pc1_range:.3f}")
+    mc3.metric("Regime events",      f"{event_mask_m.sum()}")
+    mc4.metric("Dominant driver",    dominant_ticker)
+
+    st.markdown("---")
+
+    # ── Ticker color palette — richer for dark bg ──
+    ticker_palette = [
+        "#4FC3F7", "#FF7043", "#66BB6A", "#CE93D8", "#FFB74D",
+        "#4DD0E1", "#F48FB1", "#AED581", "#A1887F", "#90A4AE"
+    ]
+    ticker_color_map = {
+        asset: ticker_palette[j % len(ticker_palette)]
+        for j, asset in enumerate(avail_basket)
+    }
+
+    # ── Build figure ──
+    fig_c = go.Figure()
+
+    for j, asset in enumerate(avail_basket):
+        color = ticker_color_map[asset]
+        col   = pc1_ticker_contrib_df[asset]
+
+        fig_c.add_trace(go.Bar(
+            x=pc1_ticker_contrib_df.index,
+            y=col.clip(lower=0),
+            name=asset,
+            marker=dict(color=color, opacity=0.88, line=dict(width=0)),
+            legendgroup=asset, showlegend=True,
+            hovertemplate=f"<b>{asset}</b>: %{{y:.3f}}<extra></extra>"
+        ))
+        fig_c.add_trace(go.Bar(
+            x=pc1_ticker_contrib_df.index,
+            y=col.clip(upper=0),
+            name=asset,
+            marker=dict(color=color, opacity=0.88, line=dict(width=0)),
+            legendgroup=asset, showlegend=False,
+            hovertemplate=f"<b>{asset}</b>: %{{y:.3f}}<extra></extra>"
+        ))
+
+    # Target PC1 fitted line — bright white, thick
+    fig_c.add_trace(go.Scatter(
+        x=target_pc1_fitted.index,
+        y=target_pc1_fitted.values,
+        name=f"{target_ticker}  β₁·F₁(t)",
+        mode="lines",
+        line=dict(color="rgba(255,255,255,0.95)", width=2.5),
+        hovertemplate="<b>%{x|%Y-%m-%d}</b><br>β₁·F₁ = %{y:.3f}<extra></extra>"
+    ))
+
+    # Zero line
+    fig_c.add_hline(
+        y=0, line_color="rgba(255,255,255,0.15)", line_width=1
+    )
+
+    # Regime event verticals — subtle red
+    for ev in event_dates_m:
+        fig_c.add_vline(
+            x=ev,
+            line_dash="dash",
+            line_color="rgba(220,80,80,0.55)",
+            line_width=1.2,
+        )
+
+    # Annotate the largest event
+    if len(event_dates_m) > 0:
+        peak_date = target_pc1_fitted.abs().idxmax()
+        peak_val  = target_pc1_fitted[peak_date]
+        fig_c.add_annotation(
+            x=peak_date,
+            y=peak_val,
+            text=f"  {peak_date.strftime('%b %Y')}",
+            showarrow=False,
+            font=dict(color="rgba(220,80,80,0.85)", size=10),
+            xanchor="left",
+            yanchor="middle"
+        )
+
+    fig_c.update_layout(
+        barmode="relative",
+        paper_bgcolor="rgba(15,15,26,1)",
+        plot_bgcolor="rgba(22,22,46,1)",
+        font=dict(color="rgba(255,255,255,0.75)", size=11),
+        title=dict(
+            text=f"<b>PC1 Decomposition</b>  ·  basket drivers vs {target_ticker} exposure",
+            font=dict(color="white", size=15),
+            x=0.0, xanchor="left"
+        ),
+        yaxis=dict(
+            title="Standardized contribution",
+            gridcolor="rgba(255,255,255,0.06)",
+            zerolinecolor="rgba(255,255,255,0.15)",
+            tickfont=dict(size=10)
+        ),
+        xaxis=dict(
+            gridcolor="rgba(255,255,255,0.04)",
+            tickfont=dict(size=10)
+        ),
+        hovermode="x unified",
+        hoverlabel=dict(
+            bgcolor="rgba(15,15,26,0.95)",
+            bordercolor="rgba(255,255,255,0.2)",
+            font_size=12
+        ),
+        height=560,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom", y=1.01,
+            font=dict(size=10, color="rgba(255,255,255,0.7)"),
+            bgcolor="rgba(0,0,0,0)",
+        ),
+        margin=dict(t=60, b=40, l=60, r=20),
+        bargap=0.15,
+    )
+
+    st.plotly_chart(fig_c, use_container_width=True)
+
+    # ── Regime event table ──
+    if len(event_dates_m) > 0:
+        st.markdown("#### Flagged Regime Events")
+        st.caption("Periods where |β₁·F₁(t)| exceeded 2σ from 60-day rolling mean.")
+        ev_rows = []
+        for ev in event_dates_m:
+            fitted_val = target_pc1_fitted.get(ev, np.nan)
+            # Top contributing asset that day
+            day_contribs = pc1_ticker_contrib_df.loc[ev].abs() if ev in pc1_ticker_contrib_df.index else pd.Series(dtype=float)
+            top_driver = day_contribs.idxmax() if not day_contribs.empty else "—"
+            ev_rows.append({
+                "Date"             : ev.strftime("%Y-%m-%d"),
+                f"{target_ticker} β₁·F₁" : f"{fitted_val:+.3f}",
+                "Top driver"       : top_driver,
+                "Driver contrib"   : f"{day_contribs.get(top_driver, 0):+.3f}" if top_driver != "—" else "—",
+            })
+        st.dataframe(pd.DataFrame(ev_rows), use_container_width=True, hide_index=True)
