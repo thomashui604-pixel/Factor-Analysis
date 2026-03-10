@@ -875,33 +875,68 @@ Moves against: {neg_str}
         )
         st.plotly_chart(fig_lines, use_container_width=True)
 
-        # ── Signed average correlation bar chart ──
-        bar_colors = [
-            "#4CAF50" if mean_corr[i] >= 0 else "#F44336"
-            for i in sort_idx
-        ]
-        fig_bar = go.Figure()
-        fig_bar.add_trace(go.Bar(
-            x=[avail_basket[i] for i in sort_idx],
-            y=[mean_corr[i] for i in sort_idx],
-            marker_color=bar_colors,
-            marker_opacity=0.85,
-            text=[f"{mean_corr[i]:+.2f}" for i in sort_idx],
-            textposition="outside",
-            hovertemplate="%{x}: %{y:+.3f}<extra></extra>"
+        # ── Signed correlation heatmap ──
+        # Assets on y-axis (sorted by mean signed corr, strongest positive first),
+        # time on x-axis, color = signed correlation value in each rolling window.
+        # This captures regime shifts: a factor character change shows as a color
+        # band transition across time — impossible to see in a mean bar.
+
+        # Sort assets by full-sample mean signed correlation (positive → negative)
+        heatmap_z   = valid_corrs[:, sort_idx].T        # (N, windows)
+        heatmap_y   = [avail_basket[i] for i in sort_idx]
+        heatmap_x   = valid_dates
+
+        # Annotate: show value as text only on last window (rightmost column)
+        last_col_text = [[f"{heatmap_z[r, -1]:+.2f}"] for r in range(len(heatmap_y))]
+
+        fig_heat = go.Figure()
+        fig_heat.add_trace(go.Heatmap(
+            z=heatmap_z,
+            x=heatmap_x,
+            y=heatmap_y,
+            zmin=-1, zmax=1,
+            colorscale=[
+                [0.0,  "#d32f2f"],   # -1  deep red
+                [0.25, "#ef9a9a"],   # -0.5
+                [0.5,  "#f5f5f5"],   # 0   near white
+                [0.75, "#a5d6a7"],   # +0.5
+                [1.0,  "#2e7d32"],   # +1  deep green
+            ],
+            colorbar=dict(
+                title="Corr",
+                thickness=12,
+                len=0.8,
+                tickvals=[-1, -0.5, 0, 0.5, 1],
+                ticktext=["-1", "-0.5", "0", "+0.5", "+1"],
+                tickfont=dict(size=10)
+            ),
+            hovertemplate="<b>%{y}</b><br>%{x|%Y-%m-%d}<br>Correlation: %{z:+.3f}<extra></extra>",
+            xgap=0.5, ygap=1,
         ))
-        fig_bar.add_hline(y=0,    line_dash="dot", line_color="rgba(150,150,150,0.5)")
-        fig_bar.add_hline(y=0.5,  line_dash="dash", line_color="rgba(150,150,150,0.3)")
-        fig_bar.add_hline(y=-0.5, line_dash="dash", line_color="rgba(150,150,150,0.3)")
-        fig_bar.update_layout(
-            title=f"{pc_label} — Mean Signed Correlation (full sample) — green = moves with, red = moves against",
-            yaxis=dict(range=[-1.15, 1.15], title="Mean correlation", zeroline=False),
-            height=280,
-            showlegend=False,
-            margin=dict(t=40, b=20),
-            bargap=0.3,
+
+        # Overlay current value annotation on rightmost column
+        for r, asset in enumerate(heatmap_y):
+            last_val = heatmap_z[r, -1]
+            fig_heat.add_annotation(
+                x=heatmap_x[-1],
+                y=asset,
+                text=f" {last_val:+.2f}",
+                showarrow=False,
+                font=dict(
+                    size=9,
+                    color="black" if abs(last_val) < 0.6 else "white"
+                ),
+                xanchor="left",
+            )
+
+        fig_heat.update_layout(
+            title=f"{pc_label} — Signed Correlation Over Time  (red = inverse, green = co-directional)",
+            height=max(220, 28 * len(heatmap_y) + 60),
+            xaxis=dict(title="", showgrid=False),
+            yaxis=dict(title="", autorange="reversed", tickfont=dict(size=11)),
+            margin=dict(t=45, b=20, l=60, r=80),
         )
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.plotly_chart(fig_heat, use_container_width=True)
 
         st.markdown("---")
 
