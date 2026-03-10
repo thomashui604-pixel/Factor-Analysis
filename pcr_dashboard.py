@@ -294,6 +294,7 @@ def rolling_pca(std_basket: pd.DataFrame,
     out_contribs     = []      # (K,) = beta_k * F_k(t) for last obs in window
     out_target       = []      # actual target return at time t (for overlay)
     out_pc1_loadings = []      # (N,) eigenvector weights for PC1 in each window
+    out_loadings     = []      # (N, k) eigenvector weights for ALL factors each window
 
     reference_loadings = None  # anchored to first window for sign alignment
 
@@ -378,6 +379,7 @@ def rolling_pca(std_basket: pd.DataFrame,
         out_contribs.append(contributions)
         out_target.append(y_dm[-1])                 # demeaned target return
         out_pc1_loadings.append(eigvecs[:, 0].copy())  # PC1 eigenvector (N,)
+        out_loadings.append(eigvecs[:, :k].copy())     # (N, k) all factor eigenvectors
 
     return {
         "dates"    : out_dates,
@@ -392,6 +394,7 @@ def rolling_pca(std_basket: pd.DataFrame,
         "contribs"      : out_contribs,       # list of (k,) arrays
         "target"        : out_target,         # list of floats (demeaned target return)
         "pc1_loadings"  : out_pc1_loadings,   # list of (N,) eigenvectors for PC1
+        "loadings"      : out_loadings,         # list of (N, k) eigenvectors all factors
     }
 
 
@@ -549,6 +552,12 @@ for i, (b, v) in enumerate(zip(res["betas"], res["var_exp"])):
 corr_arr = np.full((n_windows, n_pcs_max, n_assets), np.nan)
 for i, c in enumerate(res["pc_corr"]):
     corr_arr[i, :c.shape[0], :c.shape[1]] = c
+
+# Eigenvector loadings array: (windows, n_pcs_max, n_assets)
+loadings_arr = np.full((n_windows, n_pcs_max, n_assets), np.nan)
+for i, L in enumerate(res["loadings"]):       # L is (N, k)
+    k = L.shape[1]
+    loadings_arr[i, :k, :L.shape[0]] = L.T   # store as (k, N)
 
 # Contributions: beta_k * F_k(t) per PC per window (windows, n_pcs_max)
 contrib_arr = np.full((n_windows, n_pcs_max), np.nan)
@@ -796,108 +805,104 @@ with tab3:
     }
 
     for k in range(n_pcs_max):
-        pc_label  = f"Factor {k+1}"
-        pc_corr_k = corr_arr[:, k, :]
-        valid_rows = ~np.all(np.isnan(pc_corr_k), axis=1)
+        pc_label   = f"Factor {k+1}"
+        load_k     = loadings_arr[:, k, :]              # (windows, N) eigenvector weights
+        valid_rows = ~np.all(np.isnan(load_k), axis=1)
 
         if not valid_rows.any():
             continue
 
-        valid_dates = [d for d, v in zip(dates, valid_rows) if v]
-        valid_corrs = pc_corr_k[valid_rows]         # (windows, N) — signed
+        valid_dates  = [d for d, v in zip(dates, valid_rows) if v]
+        valid_loads  = load_k[valid_rows]               # (windows, N)
 
-        # ── Correlation stats: current (last window) vs early (first 20% of windows) ──
-        n_valid      = len(valid_corrs)
+        # ── Current and early loadings ──
+        n_valid      = len(valid_loads)
         early_n      = max(1, n_valid // 5)
-        early_corr   = np.nanmean(valid_corrs[:early_n], axis=0)   # (N,) first 20%
-        current_corr = valid_corrs[-1]                              # (N,) last window
-        mean_corr    = np.nanmean(valid_corrs, axis=0)              # (N,) full sample
-        sort_idx     = np.argsort(current_corr)[::-1]               # sort by CURRENT, not mean
+        early_load   = np.nanmean(valid_loads[:early_n], axis=0)   # (N,)
+        current_load = valid_loads[-1]                              # (N,)
 
-        # ── Detect significant flips ──
-        # A flip = early and current correlations have opposite signs AND
-        # at least one of them is meaningful (|corr| > 0.3)
-        FLIP_THRESH = 0.3
+        # Sort by current loading magnitude (largest absolute weight first)
+        sort_idx = np.argsort(np.abs(current_load))[::-1]
+
+        # ── Detect significant sign flips in eigenvector weights ──
+        FLIP_THRESH = 0.15   # eigenvector weights are smaller than correlations
         flipped = []
         for j, asset in enumerate(avail_inputs):
-            e, c = early_corr[j], current_corr[j]
+            e, c = early_load[j], current_load[j]
             if np.isnan(e) or np.isnan(c):
                 continue
             if np.sign(e) != np.sign(c) and (abs(e) > FLIP_THRESH or abs(c) > FLIP_THRESH):
                 direction = "negative → positive" if c > 0 else "positive → negative"
                 flipped.append((asset, e, c, direction))
-        # Sort flips by magnitude of change
         flipped.sort(key=lambda x: abs(x[2] - x[1]), reverse=True)
 
-        # ── Current regime label ──
-        pos_now = [(avail_inputs[i], current_corr[i]) for i in sort_idx if current_corr[i] >  0.3]
-        neg_now = [(avail_inputs[i], current_corr[i]) for i in sort_idx if current_corr[i] < -0.3]
+        # ── Interpretation card ──
+        pos_now = [(avail_inputs[i], current_load[i]) for i in sort_idx if current_load[i] >  FLIP_THRESH]
+        neg_now = [(avail_inputs[i], current_load[i]) for i in sort_idx if current_load[i] < -FLIP_THRESH]
 
-        strongest_pos_now = pos_now[0][0]  if pos_now else None
-        strongest_neg_now = neg_now[-1][0] if neg_now else None
+        top_pos = pos_now[0][0] if pos_now else None
+        top_neg = neg_now[0][0] if neg_now else None   # already sorted by |load| desc
 
-        if strongest_pos_now and abs(current_corr[avail_inputs.index(strongest_pos_now)]) >= 0.5:
-            direction_label = f"Currently moves <b>with {strongest_pos_now}</b>"
-        elif strongest_neg_now and abs(current_corr[avail_inputs.index(strongest_neg_now)]) >= 0.5:
-            direction_label = f"Currently moves <b>opposite to {strongest_neg_now}</b>"
+        if top_pos and abs(current_load[avail_inputs.index(top_pos)]) >= 0.3:
+            direction_label = f"Primarily loads on <b>{top_pos}</b> (positive)"
+        elif top_neg and abs(current_load[avail_inputs.index(top_neg)]) >= 0.3:
+            direction_label = f"Primarily loads on <b>{top_neg}</b> (negative)"
         else:
-            direction_label = "No single input strongly defines this Factor right now"
+            direction_label = "No single input dominates this Factor right now"
 
-        pos_str = ", ".join(f"<b>{a}</b> ({v:+.2f})" for a, v in pos_now) or "none above +0.3"
-        neg_str = ", ".join(f"<b>{a}</b> ({v:+.2f})" for a, v in neg_now[::-1]) or "none below -0.3"
+        pos_str = ", ".join(f"<b>{a}</b> ({v:+.3f})" for a, v in pos_now) or "none"
+        neg_str = ", ".join(f"<b>{a}</b> ({v:+.3f})" for a, v in neg_now) or "none"
 
-        # ── Flip lines ──
         if flipped:
             flip_lines = "".join(
-                f"<li><b>{a}</b>: {d} &nbsp;<span style='color:#888;'>({e:+.2f} → {c:+.2f})</span></li>"
+                f"<li><b>{a}</b>: {d} &nbsp;<span style='color:#888;'>({e:+.3f} → {c:+.3f})</span></li>"
                 for a, e, c, d in flipped[:4]
             )
             flip_html = f"""
 <div style="margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.08);">
-  <span style="color:#FFB74D; font-size:0.82rem;">⚡ Character shifts since start of sample:</span>
+  <span style="color:#FFB74D; font-size:0.82rem;">⚡ Loading sign flips since start of sample:</span>
   <ul style="margin:4px 0 0 0; padding-left:16px; color:#aaa; font-size:0.82rem; line-height:1.7;">
     {flip_lines}
   </ul>
 </div>"""
         else:
-            flip_html = '<div style="margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.08);"><span style="color:#888; font-size:0.82rem;">No significant sign flips detected — Factor character is stable.</span></div>'
+            flip_html = '<div style="margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.08);"><span style="color:#888; font-size:0.82rem;">No significant loading flips — Factor structure is stable.</span></div>'
 
         st.markdown(f"### {pc_label}")
         st.markdown(f"""
 <div style="background:rgba(33,150,243,0.07); border-left:3px solid #2196F3;
             border-radius:4px; padding:12px 16px; margin-bottom:12px; font-size:0.88rem;">
   <div style="margin-bottom:6px;">{direction_label}
-    <span style="color:#888; font-size:0.78rem; margin-left:8px;">(as of most recent window)</span>
+    <span style="color:#888; font-size:0.78rem; margin-left:8px;">(current eigenvector)</span>
   </div>
   <div style="color:#aaa; line-height:1.7;">
-    Moves with: {pos_str}<br>
-    Moves against: {neg_str}
+    Positive weights: {pos_str}<br>
+    Negative weights: {neg_str}
   </div>
   {flip_html}
 </div>
 """, unsafe_allow_html=True)
 
-        # ── Rolling correlation line chart ──
-        fig_lines = go.Figure()
+        # ── Rolling eigenvector weight chart ──
+        # Each line = one input's weight in the factor definition over time.
+        # This is the eigenvector directly — not a derived correlation.
+        # A sign flip here means the factor's composition changed structurally.
+        fig_ev = go.Figure()
         for j, asset in enumerate(avail_inputs):
-            corr_col = valid_corrs[:, j]
-            if np.isnan(corr_col).all():
+            w_col = valid_loads[:, j]
+            if np.isnan(w_col).all():
                 continue
-            fig_lines.add_trace(go.Scatter(
-                x=valid_dates, y=corr_col,
+            fig_ev.add_trace(go.Scatter(
+                x=valid_dates, y=w_col,
                 name=asset, mode="lines",
                 line=dict(color=asset_color_map[asset], width=1.8),
-                hovertemplate=f"{asset}: %{{y:.2f}}<extra></extra>"
+                hovertemplate=f"{asset}: %{{y:+.3f}}<extra></extra>"
             ))
 
-        fig_lines.add_hline(y=0,    line_dash="dot",  line_color="rgba(150,150,150,0.5)")
-        fig_lines.add_hline(y=0.5,  line_dash="dash", line_color="rgba(150,150,150,0.35)",
-                            annotation_text="0.5", annotation_font_size=9)
-        fig_lines.add_hline(y=-0.5, line_dash="dash", line_color="rgba(150,150,150,0.35)",
-                            annotation_text="-0.5", annotation_font_size=9)
-        fig_lines.update_layout(
-            title=f"{pc_label} — Rolling Correlation with Each Input",
-            yaxis=dict(range=[-1, 1], title="Correlation"),
+        fig_ev.add_hline(y=0, line_dash="dot", line_color="rgba(150,150,150,0.5)")
+        fig_ev.update_layout(
+            title=f"{pc_label} — Eigenvector Weights Over Time",
+            yaxis=dict(title="Eigenvector weight"),
             hovermode="x unified",
             height=380,
             legend=dict(
@@ -908,67 +913,58 @@ with tab3:
             ),
             margin=dict(t=40, b=80)
         )
-        st.plotly_chart(fig_lines, use_container_width=True)
+        st.plotly_chart(fig_ev, use_container_width=True)
 
-        # ── Signed correlation heatmap ──
-        # Assets on y-axis (sorted by mean signed corr, strongest positive first),
-        # time on x-axis, color = signed correlation value in each rolling window.
-        # This captures regime shifts: a factor character change shows as a color
-        # band transition across time — impossible to see in a mean bar.
+        # ── Eigenvector heatmap ──
+        # Same layout as before but now showing actual loadings, not correlations.
+        # Sort rows by current loading (most positive at top, most negative at bottom).
+        heat_sort = np.argsort(current_load)[::-1]
+        heatmap_z = valid_loads[:, heat_sort].T          # (N, windows)
+        heatmap_y = [avail_inputs[i] for i in heat_sort]
 
-        # Sort assets by full-sample mean signed correlation (positive → negative)
-        heatmap_z   = valid_corrs[:, sort_idx].T        # (N, windows)
-        heatmap_y   = [avail_inputs[i] for i in sort_idx]
-        heatmap_x   = valid_dates
-
-        # Annotate: show value as text only on last window (rightmost column)
-        last_col_text = [[f"{heatmap_z[r, -1]:+.2f}"] for r in range(len(heatmap_y))]
+        # Symmetric color range based on max absolute loading
+        zmax = max(0.2, np.nanmax(np.abs(heatmap_z)))
+        zmax = round(zmax + 0.05, 1)
 
         fig_heat = go.Figure()
         fig_heat.add_trace(go.Heatmap(
             z=heatmap_z,
-            x=heatmap_x,
+            x=valid_dates,
             y=heatmap_y,
-            zmin=-1, zmax=1,
+            zmin=-zmax, zmax=zmax,
             colorscale=[
-                [0.0,  "#d32f2f"],   # -1  deep red
-                [0.25, "#ef9a9a"],   # -0.5
-                [0.5,  "#f5f5f5"],   # 0   near white
-                [0.75, "#a5d6a7"],   # +0.5
-                [1.0,  "#2e7d32"],   # +1  deep green
+                [0.0,  "#d32f2f"],
+                [0.35, "#ffcdd2"],
+                [0.5,  "#f5f5f5"],
+                [0.65, "#c8e6c9"],
+                [1.0,  "#2e7d32"],
             ],
             colorbar=dict(
-                title="Corr",
-                thickness=12,
-                len=0.8,
-                tickvals=[-1, -0.5, 0, 0.5, 1],
-                ticktext=["-1", "-0.5", "0", "+0.5", "+1"],
+                title="Weight",
+                thickness=12, len=0.8,
                 tickfont=dict(size=10)
             ),
-            hovertemplate="<b>%{y}</b><br>%{x|%Y-%m-%d}<br>Correlation: %{z:+.3f}<extra></extra>",
+            hovertemplate="<b>%{y}</b><br>%{x|%Y-%m-%d}<br>Weight: %{z:+.3f}<extra></extra>",
             xgap=0.5, ygap=1,
         ))
 
-        # Overlay current value annotation on rightmost column
+        # Annotate current value on rightmost column
         for r, asset in enumerate(heatmap_y):
-            last_val = heatmap_z[r, -1]
-            fig_heat.add_annotation(
-                x=heatmap_x[-1],
-                y=asset,
-                text=f" {last_val:+.2f}",
-                showarrow=False,
-                font=dict(
-                    size=9,
-                    color="black" if abs(last_val) < 0.6 else "white"
-                ),
-                xanchor="left",
-            )
+            val = heatmap_z[r, -1]
+            if not np.isnan(val):
+                fig_heat.add_annotation(
+                    x=valid_dates[-1], y=asset,
+                    text=f" {val:+.3f}",
+                    showarrow=False,
+                    font=dict(size=9, color="black" if abs(val) < zmax * 0.6 else "white"),
+                    xanchor="left",
+                )
 
         fig_heat.update_layout(
-            title=f"{pc_label} — Signed Correlation Over Time  (red = inverse, green = co-directional)",
+            title=f"{pc_label} — Eigenvector Loadings Heatmap  (green = positive weight, red = negative)",
             height=max(220, 28 * len(heatmap_y) + 60),
-            xaxis=dict(title="", showgrid=False),
-            yaxis=dict(title="", autorange="reversed", tickfont=dict(size=11)),
+            xaxis=dict(showgrid=False),
+            yaxis=dict(autorange="reversed", tickfont=dict(size=11)),
             margin=dict(t=45, b=20, l=60, r=80),
         )
         st.plotly_chart(fig_heat, use_container_width=True)
