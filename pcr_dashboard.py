@@ -1164,21 +1164,15 @@ with tab6:
         color = ticker_color_map[asset]
         col   = pc1_ticker_contrib_df[asset]
 
+        # Single trace per asset — barmode="relative" handles pos/neg stacking.
+        # Eliminates the 0.000 hover artifact from the clipped split approach.
         fig_c.add_trace(go.Bar(
             x=pc1_ticker_contrib_df.index,
-            y=col.clip(lower=0),
+            y=col,
             name=asset,
             marker=dict(color=color, opacity=0.88, line=dict(width=0)),
             legendgroup=asset, showlegend=True,
             hovertemplate=f"<b>{asset}</b>: %{{y:.3f}}<extra></extra>"
-        ))
-        fig_c.add_trace(go.Bar(
-            x=pc1_ticker_contrib_df.index,
-            y=col.clip(upper=0),
-            name=asset,
-            marker=dict(color=color, opacity=0.88, line=dict(width=0)),
-            legendgroup=asset, showlegend=False,
-            hoverinfo="skip"
         ))
 
     # Target PC1 fitted line — bright white, thick
