@@ -703,90 +703,174 @@ with tab2:
 # TAB 3 — Rolling PC Labels
 # ═══════════════════════════════════════════════════════════════════════════
 with tab3:
-    st.subheader("Rolling PC Label Tracking")
+    st.subheader("What Is Each PC Capturing Over Time?")
     st.caption(
-        "In each rolling window, we correlate each PC's realized time series "
-        "with each basket asset's returns. "
-        "**This tracks whether the economic interpretation of each PC is stable over time.** "
-        "If PC2's label shifts from 'Credit' to 'Dollar' midway through the sample, "
-        "any model treating PC2 as a fixed factor is wrong."
+        "For each PC, the top chart shows a **dominant label timeline**: "
+        "at every point in time, which macro asset most closely resembles this factor? "
+        "Regime shifts appear as color changes. "
+        "The bottom chart shows the actual correlation strength of the dominant asset — "
+        "a weak dominant correlation means the factor is diffuse and hard to interpret."
     )
 
+    from collections import Counter
+
+    # Build a color map: one distinct color per basket asset, consistent across all PCs
+    asset_color_list = [
+        "#2196F3", "#FF5722", "#4CAF50", "#9C27B0", "#FF9800",
+        "#00BCD4", "#E91E63", "#8BC34A", "#795548", "#607D8B"
+    ]
+    asset_color_map = {
+        asset: asset_color_list[j % len(asset_color_list)]
+        for j, asset in enumerate(avail_basket)
+    }
+
     for k in range(n_pcs_max):
-        pc_label = f"PC{k+1}"
+        pc_label  = f"PC{k+1}"
+        pc_corr_k = corr_arr[:, k, :]                            # (windows, N)
+        valid_rows = ~np.all(np.isnan(pc_corr_k), axis=1)
 
-        # Build time series of correlation with each asset
-        corr_ts = pd.DataFrame(
-            corr_arr[:, k, :],
-            index=dates,
-            columns=avail_basket
-        ).dropna(how="all")
-
-        if corr_ts.empty:
+        if not valid_rows.any():
             continue
 
-        st.subheader(f"{pc_label} — Rolling Correlation with Each Basket Asset")
+        valid_dates = [d for d, v in zip(dates, valid_rows) if v]
+        valid_corrs = pc_corr_k[valid_rows]                      # (valid_windows, N)
 
-        fig_label = go.Figure()
-        asset_colors = px.colors.qualitative.Set2
-        for j, asset in enumerate(avail_basket):
-            if asset in corr_ts.columns and corr_ts[asset].notna().any():
-                fig_label.add_trace(go.Scatter(
-                    x=corr_ts.index,
-                    y=corr_ts[asset],
-                    name=asset, mode="lines",
-                    line=dict(color=asset_colors[j % len(asset_colors)], width=1.8),
-                    hovertemplate=f"{asset}: %{{y:.2f}}<extra></extra>"
-                ))
-        fig_label.add_hline(y=0,    line_dash="dot",  line_color="rgba(150,150,150,0.5)")
-        fig_label.add_hline(y=0.5,  line_dash="dash", line_color="rgba(150,150,150,0.3)")
-        fig_label.add_hline(y=-0.5, line_dash="dash", line_color="rgba(150,150,150,0.3)")
-        fig_label.update_layout(
-            yaxis=dict(range=[-1, 1], title="Correlation with PC"),
-            hovermode="x unified",
-            height=360,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            margin=dict(t=20, b=20)
+        # Dominant asset per window: highest |correlation|
+        dom_idx      = np.nanargmax(np.abs(valid_corrs), axis=1) # (valid_windows,)
+        dom_asset    = [avail_basket[i] for i in dom_idx]
+        dom_corr_val = valid_corrs[np.arange(len(dom_idx)), dom_idx]  # signed corr of dominant
+
+        # ── Stability stats ──
+        counts    = Counter(dom_asset)
+        total     = len(dom_asset)
+        top_asset = counts.most_common(1)[0][0]
+        top_pct   = counts.most_common(1)[0][1] / total
+
+        st.markdown(f"### {pc_label}")
+
+        # Stability badge
+        if top_pct > 0.8:
+            st.success(
+                f"✅ **Stable factor** — dominated by **{top_asset}** in "
+                f"{top_pct:.0%} of windows. Consistent economic interpretation."
+            )
+        elif top_pct > 0.5:
+            st.info(
+                f"ℹ️ **Moderately stable** — {top_asset} leads ({top_pct:.0%}) "
+                f"but interpretation shifts at times."
+            )
+        else:
+            st.warning(
+                f"⚠️ **Unstable factor** — no single asset dominates. "
+                f"Interpretation is regime-dependent. Treat this beta with caution."
+            )
+
+        # ── Chart 1: Dominant label timeline ──
+        # Implemented as a scatter of colored dots + filled regions by dominant asset.
+        # We group consecutive windows with the same dominant asset into segments
+        # and draw a filled band for each segment.
+
+        fig_timeline = go.Figure()
+
+        # Build segments: consecutive runs of same dominant asset
+        segments = []
+        seg_start = 0
+        for idx in range(1, len(dom_asset)):
+            if dom_asset[idx] != dom_asset[idx - 1]:
+                segments.append((seg_start, idx - 1, dom_asset[idx - 1]))
+                seg_start = idx
+        segments.append((seg_start, len(dom_asset) - 1, dom_asset[-1]))
+
+        # Draw one filled rectangle per segment using vrect-style shapes
+        # Use add_trace with fill for each segment
+        for seg_s, seg_e, asset in segments:
+            x0 = valid_dates[seg_s]
+            x1 = valid_dates[seg_e]
+            color = asset_color_map[asset]
+            fig_timeline.add_vrect(
+                x0=x0, x1=x1,
+                fillcolor=hex_to_rgba(color, 0.25),
+                layer="below", line_width=0,
+                annotation_text=asset if (seg_e - seg_s) > max(3, len(dom_asset) // 20) else "",
+                annotation_position="top left",
+                annotation_font_size=9,
+                annotation_font_color=color,
+            )
+
+        # Overlay: dominant correlation strength (so you can see conviction)
+        fig_timeline.add_trace(go.Scatter(
+            x=valid_dates,
+            y=np.abs(dom_corr_val),
+            mode="lines",
+            name="|Corr| of dominant asset",
+            line=dict(color="rgba(0,0,0,0.5)", width=1.5),
+            hovertemplate="Date: %{x}<br>|Corr|: %{y:.2f}<extra></extra>"
+        ))
+
+        # Colored dots: one per window, colored by dominant asset
+        for asset in avail_basket:
+            mask = [i for i, a in enumerate(dom_asset) if a == asset]
+            if not mask:
+                continue
+            fig_timeline.add_trace(go.Scatter(
+                x=[valid_dates[i] for i in mask],
+                y=np.abs(dom_corr_val[mask]),
+                mode="markers",
+                name=asset,
+                marker=dict(
+                    color=asset_color_map[asset],
+                    size=6, opacity=0.85,
+                    line=dict(width=0)
+                ),
+                hovertemplate=f"{asset}<br>Date: %{{x}}<br>|Corr|: %{{y:.2f}}<extra></extra>"
+            ))
+
+        fig_timeline.add_hline(
+            y=0.5, line_dash="dash", line_color="rgba(100,100,100,0.4)",
+            annotation_text="0.5 conviction threshold", annotation_font_size=9
         )
-        st.plotly_chart(fig_label, use_container_width=True)
+        fig_timeline.update_layout(
+            title=f"{pc_label} — Dominant Economic Factor Over Time",
+            yaxis=dict(range=[0, 1.05], title="|Correlation| with dominant asset"),
+            hovermode="x unified",
+            height=320,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, font_size=10),
+            margin=dict(t=40, b=20)
+        )
+        st.plotly_chart(fig_timeline, use_container_width=True)
 
-        # Label stability summary
-        # For each window, what asset has the highest |corr|?
-        # Some windows may be all-NaN for this PC (not retained) — skip those.
-        pc_corr_k     = corr_arr[:, k, :]                          # (windows, N)
-        valid_rows    = ~np.all(np.isnan(pc_corr_k), axis=1)       # windows where PC k existed
-        dominant_idx  = np.nanargmax(np.abs(pc_corr_k[valid_rows]), axis=1)
-        dominant_name = [avail_basket[i] for i in dominant_idx]
-        from collections import Counter
-        counts = Counter(dominant_name)
-        total  = len(dominant_name)
+        # ── Chart 2: Full correlation fan (collapsible) ──
+        # Kept as a secondary view for those who want to see all assets at once
+        with st.expander(f"Show full correlation detail for {pc_label} (all basket assets)"):
+            corr_ts = pd.DataFrame(valid_corrs, index=valid_dates, columns=avail_basket)
 
-        stability_rows = [
-            {"Asset": a, "Dominant in % of windows": f"{c/total:.0%}", "Count": c}
-            for a, c in counts.most_common()
-        ]
-        with st.expander(f"{pc_label} — Label Stability (what asset dominates, and how often)"):
-            st.dataframe(pd.DataFrame(stability_rows), use_container_width=True, hide_index=True)
+            fig_fan = go.Figure()
+            for j, asset in enumerate(avail_basket):
+                if corr_ts[asset].notna().any():
+                    fig_fan.add_trace(go.Scatter(
+                        x=corr_ts.index, y=corr_ts[asset],
+                        name=asset, mode="lines",
+                        line=dict(color=asset_color_map[asset], width=1.5),
+                        hovertemplate=f"{asset}: %{{y:.2f}}<extra></extra>"
+                    ))
+            fig_fan.add_hline(y=0,    line_dash="dot",  line_color="rgba(150,150,150,0.4)")
+            fig_fan.add_hline(y=0.5,  line_dash="dash", line_color="rgba(150,150,150,0.3)")
+            fig_fan.add_hline(y=-0.5, line_dash="dash", line_color="rgba(150,150,150,0.3)")
+            fig_fan.update_layout(
+                yaxis=dict(range=[-1, 1], title="Correlation with PC"),
+                hovermode="x unified", height=320,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, font_size=10),
+                margin=dict(t=10, b=10)
+            )
+            st.plotly_chart(fig_fan, use_container_width=True)
 
-            # Interpret stability
-            top_pct = counts.most_common(1)[0][1] / total
-            top_asset = counts.most_common(1)[0][0]
-            if top_pct > 0.8:
-                st.success(
-                    f"✅ **{pc_label} is stable**: dominated by **{top_asset}** in "
-                    f"{top_pct:.0%} of windows. This factor has a consistent economic interpretation."
-                )
-            elif top_pct > 0.5:
-                st.info(
-                    f"ℹ️ **{pc_label} is moderately stable**: {top_asset} leads ({top_pct:.0%}) "
-                    f"but other assets take over at times. Interpret with some caution."
-                )
-            else:
-                st.warning(
-                    f"⚠️ **{pc_label} is unstable**: no single asset dominates. "
-                    f"The economic interpretation of this PC shifts across regimes. "
-                    f"Treat betas on this factor as regime-dependent."
-                )
+        # ── Breakdown table ──
+        with st.expander(f"{pc_label} — Label breakdown (% of windows)"):
+            rows = [
+                {"Asset": a, "% of windows": f"{c/total:.0%}", "Windows": c}
+                for a, c in counts.most_common()
+            ]
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
         st.markdown("---")
 
