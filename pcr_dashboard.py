@@ -779,11 +779,11 @@ with tab2:
 with tab3:
     st.subheader("What Is Each PC Capturing Over Time?")
     st.caption(
-        "For each PC, the lines show the rolling correlation between that PC's realized "
-        "time series and each basket asset's returns. "
-        "When one line pulls away from the rest (above 0.5 or below -0.5), "
-        "that asset's risk dimension is what the PC is currently capturing. "
-        "Crossovers and shifts in dominance = regime changes in factor interpretation."
+        "Lines show the rolling correlation between each PC and each basket asset. "
+        "Sign matters: a strong negative correlation means the PC moves *opposite* to that asset — "
+        "it is still strongly related, but inversely. "
+        "The interpretation panel below each chart uses signed averages to derive the "
+        "economic meaning of each PC."
     )
 
     from collections import Counter
@@ -806,25 +806,48 @@ with tab3:
             continue
 
         valid_dates = [d for d, v in zip(dates, valid_rows) if v]
-        valid_corrs = pc_corr_k[valid_rows]
+        valid_corrs = pc_corr_k[valid_rows]         # (windows, N) — signed
 
-        # Stability badge
-        abs_corrs = np.abs(valid_corrs)
-        dom_idx   = np.nanargmax(abs_corrs, axis=1)
-        dom_asset = [avail_basket[i] for i in dom_idx]
-        counts    = Counter(dom_asset)
-        total     = len(dom_asset)
-        top_asset = counts.most_common(1)[0][0]
-        top_pct   = counts.most_common(1)[0][1] / total
+        # ── Mean signed correlation per asset over all valid windows ──
+        mean_corr = np.nanmean(valid_corrs, axis=0)   # (N,)
+        # Sort by signed value for bar chart
+        sort_idx  = np.argsort(mean_corr)[::-1]        # high → low
+
+        # ── Directional interpretation ──
+        # Positive corr: PC moves WITH this asset
+        # Negative corr: PC moves AGAINST this asset (inversely)
+        pos_assets = [(avail_basket[i], mean_corr[i]) for i in sort_idx if mean_corr[i] >  0.3]
+        neg_assets = [(avail_basket[i], mean_corr[i]) for i in sort_idx if mean_corr[i] < -0.3]
 
         st.markdown(f"### {pc_label}")
-        if top_pct > 0.8:
-            st.success(f"✅ **Stable** — **{top_asset}** dominates in {top_pct:.0%} of windows.")
-        elif top_pct > 0.5:
-            st.info(f"ℹ️ **Moderate** — {top_asset} leads ({top_pct:.0%}) but shifts at times.")
-        else:
-            st.warning(f"⚠️ **Unstable** — no single asset dominates. Regime-dependent.")
 
+        # ── Interpretation card ──
+        pos_str = ", ".join(f"**{a}** ({v:+.2f})" for a, v in pos_assets) or "none above 0.3"
+        neg_str = ", ".join(f"**{a}** ({v:+.2f})" for a, v in neg_assets[::-1]) or "none below -0.3"
+
+        # Derive a plain-English label from the strongest signed driver
+        strongest_pos = pos_assets[0][0]  if pos_assets else None
+        strongest_neg = neg_assets[-1][0] if neg_assets else None  # most negative
+
+        if strongest_pos and abs(mean_corr[avail_basket.index(strongest_pos)]) >= 0.5:
+            direction_label = f"This PC moves **with {strongest_pos}**"
+        elif strongest_neg and abs(mean_corr[avail_basket.index(strongest_neg)]) >= 0.5:
+            direction_label = f"This PC moves **opposite to {strongest_neg}** (and the equity cluster)"
+        else:
+            direction_label = "No single asset strongly defines this PC"
+
+        st.markdown(f"""
+<div style="background:rgba(33,150,243,0.07); border-left:3px solid #2196F3;
+            border-radius:4px; padding:12px 16px; margin-bottom:12px; font-size:0.88rem;">
+<b>Interpretation:</b> {direction_label}<br>
+<span style="color:#aaa;">
+Moves with: {pos_str}<br>
+Moves against: {neg_str}
+</span>
+</div>
+""", unsafe_allow_html=True)
+
+        # ── Rolling correlation line chart ──
         fig_lines = go.Figure()
         for j, asset in enumerate(avail_basket):
             corr_col = valid_corrs[:, j]
@@ -846,18 +869,39 @@ with tab3:
             title=f"{pc_label} — Rolling Correlation with Each Basket Asset",
             yaxis=dict(range=[-1, 1], title="Correlation"),
             hovermode="x unified",
-            height=360,
+            height=340,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, font_size=10),
             margin=dict(t=40, b=20)
         )
         st.plotly_chart(fig_lines, use_container_width=True)
 
-        with st.expander(f"{pc_label} — Label breakdown (% of windows dominant)"):
-            rows = [
-                {"Asset": a, "% of windows dominant": f"{c/total:.0%}", "Windows": c}
-                for a, c in counts.most_common()
-            ]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        # ── Signed average correlation bar chart ──
+        bar_colors = [
+            "#4CAF50" if mean_corr[i] >= 0 else "#F44336"
+            for i in sort_idx
+        ]
+        fig_bar = go.Figure()
+        fig_bar.add_trace(go.Bar(
+            x=[avail_basket[i] for i in sort_idx],
+            y=[mean_corr[i] for i in sort_idx],
+            marker_color=bar_colors,
+            marker_opacity=0.85,
+            text=[f"{mean_corr[i]:+.2f}" for i in sort_idx],
+            textposition="outside",
+            hovertemplate="%{x}: %{y:+.3f}<extra></extra>"
+        ))
+        fig_bar.add_hline(y=0,    line_dash="dot", line_color="rgba(150,150,150,0.5)")
+        fig_bar.add_hline(y=0.5,  line_dash="dash", line_color="rgba(150,150,150,0.3)")
+        fig_bar.add_hline(y=-0.5, line_dash="dash", line_color="rgba(150,150,150,0.3)")
+        fig_bar.update_layout(
+            title=f"{pc_label} — Mean Signed Correlation (full sample) — green = moves with, red = moves against",
+            yaxis=dict(range=[-1.15, 1.15], title="Mean correlation", zeroline=False),
+            height=280,
+            showlegend=False,
+            margin=dict(t=40, b=20),
+            bargap=0.3,
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
 
         st.markdown("---")
 
